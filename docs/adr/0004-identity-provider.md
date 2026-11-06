@@ -1,6 +1,8 @@
 # ADR-0004: Identity provider: Zitadel Cloud (EU), conditional
 
-Status: conditionally accepted, pending vendor verification
+Status: conditionally accepted, pending vendor verification. See docs/reports/zitadel-verification.md.
+
+Correction (2026-11-06): the parent company is ZITADEL Inc. (US); CAOS AG (CH) is the contracting entity for Cloud. "Swiss company" is therefore not a sufficient argument against US-law exposure.
 
 M0 uses only a local mock OIDC provider. The application speaks standard OIDC (`openid-client`); roles and permissions live in our own database. Switching IdP is configuration plus a user migration.
 

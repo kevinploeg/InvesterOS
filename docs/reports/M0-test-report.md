@@ -14,7 +14,7 @@ Date: 2026-11-06 · Branch: `m0-foundations` · Data: **synthetic only** · Depl
 | Kernel coverage (statements/branches/functions/lines) | ✅ 100 / 100 / 100 / 100 |
 | Production build (Next.js 16.4.5) | ✅ |
 | E2E (Playwright, Chromium, production build, mock IdP) | ✅ 11/11 |
-| CI on GitHub Actions | ⏳ not run yet: the workflow is in the branch and runs on the first PR/push |
+| CI on GitHub Actions | ✅ [run 42298715337](https://github.com/kevinploeg/InvesterOS/actions/runs/42298715337): verify (lint, typecheck, audit, 239 tests, 100% kernel coverage, schema lint, build, 11 E2E) + gitleaks, on PostgreSQL 17.11 |
 
 Locally tested on PostgreSQL **16.15**. CI uses **postgres:17**. The code uses no 17-only features.
 
@@ -43,7 +43,7 @@ Locally tested on PostgreSQL **16.15**. CI uses **postgres:17**. The code uses n
 | Access managers can grant themselves access to restricted resources (attributable through `granted_by`) | Medium | M2: four-eyes on grants, self-grants refused |
 | CSP still allows `'unsafe-inline'` for scripts | Medium | M5: nonce-based CSP |
 | GitHub Actions on tags instead of SHAs (could not be verified from this environment) | Medium | M1-AC12 |
-| CI has not run on GitHub yet | Low | first push/PR |
+| CI warning: actions on Node 20 (deprecated) | Low | M1-AC8.1 |
 | No server actions yet, so the server-action guard is untested | Low | M1-AC10, together with the first mutation |
 | Typed query builder not chosen yet (ADR-0006) | Low | M1 |
 | `redact()` is key-based (also redacts e.g. `team_name`, i.e. conservative) | Low | M1 logging policy |
