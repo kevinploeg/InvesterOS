@@ -4,15 +4,15 @@
  * A final block checks that the app-layer authorize() agrees with the database.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { withTenantTx } from '../src/db';
+import { withTenantTx, type SessionCredential } from '../src/db';
 import { authorize, loadPrincipalAccess } from '../src/authz';
 import { writeAudit } from '../src/audit';
 import * as fx from '../src/fixtures';
-import { asApp, harness, ISSUER, staffSettings, type Harness } from './helpers';
+import { asApp, harness, ISSUER, type As, type Harness } from './helpers';
 
 let h: Harness;
 let T: fx.TenantFixture;
-const U: Record<string, { userId: string; membershipId: string }> = {};
+const U: Record<string, { userId: string; membershipId: string; cred: SessionCredential }> = {};
 let R: string; // restricted securable
 let S: string; // standard securable
 let R2: string; // second restricted securable (nobody granted)
@@ -22,9 +22,9 @@ async function user(name: string, role: keyof fx.TenantFixture['roles']) {
   const userId = await fx.createUser(h.admin, { email: `${name}@synthetic.test`, displayName: name, issuer: ISSUER, subject: name });
   const membershipId = await fx.addMembership(h.admin, T.id, userId);
   await fx.assignRole(h.admin, T.id, T.roles[role], { membershipId });
-  U[name] = { userId, membershipId };
+  U[name] = { userId, membershipId, cred: await fx.login(h.admin, userId) };
 }
-const as = (name: string) => staffSettings(T.id, U[name]!.userId, U[name]!.membershipId);
+const as = (name: string): As => ({ cred: U[name]!.cred, slug: 'barrier' });
 const note = (securableId: string) => h.admin.query('INSERT INTO probe_notes (tenant_id, id, securable_id, body) VALUES ($1, gen_random_uuid(), $2, $3)', [T.id, securableId, 'synthetic note']);
 
 beforeAll(async () => {
@@ -154,11 +154,11 @@ describe('classification changes apply immediately to all children', () => {
 });
 
 describe('membership state', () => {
-  it('a suspended member with a write grant loses access immediately', async () => {
+  it('a suspended member with a write grant loses access immediately (no context at all)', async () => {
     await h.admin.query(`UPDATE tenant_memberships SET status = 'suspended' WHERE id = $1`, [U.writer!.membershipId]);
     try {
-      expect(await notesOn('writer', R)).toBe(0);
-      expect((await insertNote('writer', R)).code).toBe('42501');
+      expect((await asApp(h.app, as('writer'), 'SELECT 1')).code).toBe('IOS04');
+      expect((await insertNote('writer', R)).code).toBe('IOS04');
     } finally {
       await h.admin.query(`UPDATE tenant_memberships SET status = 'active' WHERE id = $1`, [U.writer!.membershipId]);
     }
@@ -167,8 +167,7 @@ describe('membership state', () => {
 
 describe('audit log respects the barrier', () => {
   it('admin with audit.read cannot read audit events about R without a grant; compliance can', async () => {
-    const ctx = fx.staffContext(T, U.writer!.userId, U.writer!.membershipId);
-    await withTenantTx(h.app, ctx, (tx) => writeAudit(tx, ctx, { action: 'probe.updated', securableId: R }));
+    await withTenantTx(h.app, U.writer!.cred, 'barrier', 'write', (tx, ctx) => writeAudit(tx, ctx, { action: 'probe.updated', securableId: R }));
     const count = async (who: string) =>
       Number((await asApp(h.app, as(who), `SELECT count(*)::int AS n FROM audit_events WHERE securable_id = $1`, [R])).rows[0]?.n);
     expect(await count('admin')).toBe(0);
@@ -179,8 +178,7 @@ describe('audit log respects the barrier', () => {
 
 describe('app-layer authorize() agrees with the database', () => {
   it.each(['owner', 'admin', 'reader', 'writer', 'teamwriter', 'outsider', 'expired', 'compliance'])('%s', async (who) => {
-    const ctx = fx.staffContext(T, U[who]!.userId, U[who]!.membershipId);
-    const access = await withTenantTx(h.app, ctx, (tx) => loadPrincipalAccess(tx));
+    const access = await withTenantTx(h.app, U[who]!.cred, 'barrier', 'read', (tx) => loadPrincipalAccess(tx));
     const dbSees = (await visibleSecurables(who)).includes(R);
     const appAllows = authorize(access, 'projects.read', { securableId: R, classification: 'restricted' }).allowed;
     // projects.read is held by every role here, so the decision is driven purely by the barrier.

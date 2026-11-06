@@ -12,7 +12,10 @@ export const GLOBAL_TABLES: Readonly<Record<string, string>> = {
 };
 
 export const REQUIRED_POLICY_ROLES = ['ios_app', 'ios_worker'] as const;
-const APP_ROLES = ['ios_app', 'ios_worker', 'ios_definer'] as const;
+const APP_ROLES = ['ios_app', 'ios_worker', 'ios_definer', 'ios_auth'] as const;
+
+/** Tables on which ios_definer may hold policies (pre-context auth paths only). */
+export const DEFINER_TABLES = ['users', 'user_identities', 'sessions', 'tenants', 'tenant_memberships'] as const;
 
 export interface LintViolation {
   rule: string;
@@ -108,7 +111,7 @@ export async function lintSchema(db: pg.ClientBase): Promise<LintViolation[]> {
   const owned = await db.query<{ owner: string; n: string }>(`
     SELECT pg_get_userbyid(c.relowner) AS owner, count(*)::text AS n
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname IN ('public', 'app', 'auth', 'meta') AND pg_get_userbyid(c.relowner) IN ('ios_app', 'ios_worker')
+    WHERE n.nspname IN ('public', 'app', 'auth', 'meta') AND pg_get_userbyid(c.relowner) IN ('ios_app', 'ios_worker', 'ios_auth')
     GROUP BY 1`);
   for (const o of owned.rows) v.push({ rule: 'R5-request-role-owns-objects', object: o.owner, detail: `owns ${o.n} relations` });
 
@@ -128,6 +131,28 @@ export async function lintSchema(db: pg.ClientBase): Promise<LintViolation[]> {
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname IN ('app', 'auth') AND has_function_privilege('public', p.oid, 'EXECUTE')`);
   for (const f of pub.rows) v.push({ rule: 'R8-public-execute', object: f.fn, detail: 'EXECUTE granted to PUBLIC' });
+
+  // R9: nothing may derive identity/tenant from GUCs (set_config is writable by any session).
+  const guc = await db.query<{ obj: string }>(`
+    SELECT p.oid::regprocedure::text AS obj FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname IN ('public', 'app', 'auth') AND p.prosrc ~* 'current_setting\\s*\\(\\s*''app\\.'
+    UNION ALL
+    SELECT tablename || '.' || policyname FROM pg_policies
+    WHERE schemaname = 'public' AND (coalesce(qual, '') || coalesce(with_check, '')) ~* 'current_setting'`);
+  for (const g of guc.rows) v.push({ rule: 'R9-no-guc-identity', object: g.obj, detail: 'reads a GUC; identity must come from auth.begin' });
+
+  // R10: ios_definer policies only on the allow-listed pre-context tables.
+  for (const p of pols.rows) {
+    if (p.roles.includes('ios_definer') && !(DEFINER_TABLES as readonly string[]).includes(p.tablename)) {
+      v.push({ rule: 'R10-definer-scope', object: `${p.tablename}.${p.policyname}`, detail: 'ios_definer policy outside DEFINER_TABLES' });
+    }
+  }
+
+  // R11: request roles must not hold TEMPORARY (they could otherwise create/shadow temp objects).
+  const temp = await db.query<{ rolname: string }>(`
+    SELECT r.rolname FROM pg_roles r WHERE r.rolname IN ('ios_app', 'ios_worker', 'ios_auth')
+      AND has_database_privilege(r.rolname, current_database(), 'TEMPORARY')`);
+  for (const t of temp.rows) v.push({ rule: 'R11-no-temp-for-request-roles', object: t.rolname, detail: 'holds TEMPORARY on the database' });
 
   return v;
 }

@@ -1,63 +1,136 @@
+import { inspect } from 'node:util';
 import pg from 'pg';
+import type { RequestContext, SystemContext } from '../context';
+import { AuthenticationError, NotFoundError } from '../errors';
 import { isUuid } from '../ids';
-import type { TenantContext } from '../context';
 
 export type Tx = pg.PoolClient;
-
-export interface DbPools {
-  /** ios_app: user requests. */
-  app: pg.Pool;
-}
+export type TxMode = 'read' | 'write';
 
 export function createPool(connectionString: string, max = 10): pg.Pool {
-  return new pg.Pool({ connectionString, max, idleTimeoutMillis: 30_000, application_name: 'investoros' });
+  return new pg.Pool({ connectionString, max, idleTimeoutMillis: 30_000, application_name: 'investoros', statement_timeout: 15_000 });
 }
 
-async function inTx<T>(pool: pg.Pool, settings: Record<string, string>, fn: (tx: Tx) => Promise<T>): Promise<T> {
+/**
+ * Holds a raw session token. It is passed to the database (auth.begin), never logged or serialised.
+ */
+export class SessionCredential {
+  readonly #token: string;
+  constructor(token: string) {
+    this.#token = token;
+  }
+  /** Only for the kernel's DB calls and for setting the cookie. */
+  reveal(): string {
+    return this.#token;
+  }
+  toJSON(): string {
+    return '[SessionCredential]';
+  }
+  toString(): string {
+    return '[SessionCredential]';
+  }
+  [inspect.custom](): string {
+    return '[SessionCredential]';
+  }
+}
+
+/** Maps the database's access errors to HTTP semantics; everything else propagates unchanged. */
+export function mapDbError(err: unknown): unknown {
+  const code = (err as { code?: string }).code;
+  if (code === 'IOS01') return new AuthenticationError('No valid session');
+  if (code === 'IOS04') return new NotFoundError();
+  return err;
+}
+
+async function inTx<T>(pool: pg.Pool, begin: (c: Tx) => Promise<void>, fn: (tx: Tx) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const names = Object.keys(settings);
-    if (names.length) {
-      // set_config(..., true) = transaction-local: the setting dies at COMMIT/ROLLBACK, so a pooled
-      // connection can never carry one tenant's context into another request.
-      const sql = `SELECT ${names.map((_, i) => `set_config($${2 * i + 1}, $${2 * i + 2}, true)`).join(', ')}`;
-      await client.query(sql, names.flatMap((n) => [n, settings[n]!]));
-    }
+    await begin(client);
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
-    throw err;
+    throw mapDbError(err);
   } finally {
     client.release();
   }
 }
 
-/** Runs fn in a transaction bound to a tenant + principal. The ONLY way to touch tenant data. */
-export function withTenantTx<T>(pool: pg.Pool, ctx: TenantContext, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  if (!isUuid(ctx.tenantId)) throw new Error('withTenantTx: invalid tenantId');
-  if (ctx.principalType === 'staff') {
-    if (!isUuid(ctx.userId) || !isUuid(ctx.membershipId)) throw new Error('withTenantTx: invalid principal');
-    return inTx(
-      pool,
-      { 'app.tenant_id': ctx.tenantId, 'app.user_id': ctx.userId, 'app.membership_id': ctx.membershipId, 'app.principal_type': 'staff' },
-      fn,
-    );
-  }
-  return inTx(pool, { 'app.tenant_id': ctx.tenantId, 'app.principal_type': 'system' }, fn);
+interface BeginRow {
+  session_id: string;
+  user_id: string;
+  tenant_id: string | null;
+  tenant_slug: string | null;
+  membership_id: string | null;
+  active_tenant_slug: string | null;
 }
 
-/** User-scoped transaction without a tenant (login, tenant switcher, own sessions). */
-export function withUserTx<T>(pool: pg.Pool, userId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  if (!isUuid(userId)) throw new Error('withUserTx: invalid userId');
-  return inTx(pool, { 'app.user_id': userId }, fn);
+/**
+ * The ONLY way to touch tenant data. The database validates the session token and the membership
+ * (auth.begin) and establishes the context itself; the application cannot assert an identity.
+ * 'write' mode additionally serialises against concurrent revocations (see migration 0005).
+ */
+export function withTenantTx<T>(
+  pool: pg.Pool,
+  credential: SessionCredential,
+  tenantSlug: string,
+  mode: TxMode,
+  fn: (tx: Tx, ctx: RequestContext) => Promise<T>,
+  requestId = '',
+): Promise<T> {
+  let ctx: RequestContext | undefined;
+  return inTx(
+    pool,
+    async (c) => {
+      const r = await c.query<BeginRow>('SELECT * FROM auth.begin($1, $2, $3)', [credential.reveal(), tenantSlug, mode]);
+      const row = r.rows[0]!;
+      ctx = {
+        tenantId: row.tenant_id!,
+        tenantSlug: row.tenant_slug!,
+        userId: row.user_id,
+        membershipId: row.membership_id!,
+        sessionId: row.session_id,
+        principalType: 'staff',
+        requestId,
+      };
+    },
+    (tx) => fn(tx, ctx!),
+  );
 }
 
-/** No context at all: only the SECURITY DEFINER auth.* functions are useful here. */
-export function withAnonymousTx<T>(pool: pg.Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
-  return inTx(pool, {}, fn);
+export interface UserContext {
+  readonly userId: string;
+  readonly sessionId: string;
+  readonly activeTenantSlug: string | null;
+}
+
+/** User-level transaction without a tenant (tenant switcher, own memberships, logout). */
+export function withUserTx<T>(pool: pg.Pool, credential: SessionCredential, fn: (tx: Tx, user: UserContext) => Promise<T>): Promise<T> {
+  let user: UserContext | undefined;
+  return inTx(
+    pool,
+    async (c) => {
+      const r = await c.query<BeginRow>('SELECT * FROM auth.begin($1, NULL, $2)', [credential.reveal(), 'read']);
+      const row = r.rows[0]!;
+      user = { userId: row.user_id, sessionId: row.session_id, activeTenantSlug: row.active_tenant_slug };
+    },
+    (tx) => fn(tx, user!),
+  );
+}
+
+/** Named system job (ios_worker only). Reaches only what system policies explicitly allow. */
+export function withSystemTx<T>(workerPool: pg.Pool, ctx: SystemContext, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  if (!isUuid(ctx.tenantId)) throw new Error('withSystemTx: invalid tenantId');
+  return inTx(workerPool, async (c) => {
+    await c.query('SELECT auth.begin_system($1, $2)', [ctx.tenantId, ctx.jobName]);
+  }, fn);
+}
+
+/** No request context (ios_auth pool: session creation after OIDC validation). */
+export function withAuthTx<T>(authPool: pg.Pool, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return inTx(authPool, async () => undefined, fn);
 }
 
 /**

@@ -6,10 +6,10 @@ import {
   assertAllowed, authorize, renderRoleMatrix, isPermission, loadPrincipalAccess, PERMISSION_KEYS, PERMISSIONS, permissionDef,
   SYSTEM_ROLE_KEYS, SYSTEM_ROLES, type Permission, type PrincipalAccess,
 } from '../src/authz';
-import { withTenantTx } from '../src/db';
+import { withTenantTx, type SessionCredential } from '../src/db';
 import { AuthorizationError } from '../src/errors';
 import * as fx from '../src/fixtures';
-import { asApp, harness, ISSUER, staffSettings, type Harness } from './helpers';
+import { asApp, harness, ISSUER, type As, type Harness } from './helpers';
 
 const access = (perms: Iterable<Permission>, extra: Partial<PrincipalAccess> = {}): PrincipalAccess => ({
   membershipActive: true,
@@ -108,7 +108,9 @@ describe('authorization rules', () => {
 describe('database parity', () => {
   let h: Harness;
   let T: fx.TenantFixture;
-  const members: Record<string, { userId: string; membershipId: string }> = {};
+  const members: Record<string, { userId: string; membershipId: string; cred: SessionCredential }> = {};
+  const as = (m: { cred: SessionCredential }): As => ({ cred: m.cred, slug: 'parity' });
+  const access = (m: { cred: SessionCredential }) => withTenantTx(h.app, m.cred, 'parity', 'read', (tx) => loadPrincipalAccess(tx));
 
   beforeAll(async () => {
     h = await harness();
@@ -117,7 +119,7 @@ describe('database parity', () => {
       const userId = await fx.createUser(h.admin, { email: `${role}@synthetic.test`, displayName: role, issuer: ISSUER, subject: role });
       const membershipId = await fx.addMembership(h.admin, T.id, userId);
       await fx.assignRole(h.admin, T.id, T.roles[role], { membershipId });
-      members[role] = { userId, membershipId };
+      members[role] = { userId, membershipId, cred: await fx.login(h.admin, userId) };
     }
     // team-inherited role
     const userId = await fx.createUser(h.admin, { email: 'teamie@synthetic.test', displayName: 'teamie', issuer: ISSUER, subject: 'teamie' });
@@ -125,7 +127,7 @@ describe('database parity', () => {
     const team = await fx.createTeam(h.admin, T.id, 'Compliance desk');
     await fx.addTeamMember(h.admin, T.id, team, membershipId);
     await fx.assignRole(h.admin, T.id, T.roles.compliance, { teamId: team });
-    members.teamie = { userId, membershipId };
+    members.teamie = { userId, membershipId, cred: await fx.login(h.admin, userId) };
   });
   afterAll(async () => h?.close());
 
@@ -137,7 +139,7 @@ describe('database parity', () => {
   it('app.has_permission() equals the TS registry for every role × permission', async () => {
     for (const role of SYSTEM_ROLE_KEYS) {
       const m = members[role]!;
-      const r = await asApp(h.app, staffSettings(T.id, m.userId, m.membershipId),
+      const r = await asApp(h.app, as(m),
         `SELECT p.key, app.has_permission(p.key) AS ok FROM meta.permissions p ORDER BY p.key`);
       for (const row of r.rows) {
         expect(row.ok, `${role} ${row.key}`).toBe(SYSTEM_ROLES[role].permissions.has(row.key as Permission));
@@ -148,7 +150,7 @@ describe('database parity', () => {
   it('loadPrincipalAccess() returns exactly the role permissions, including team-inherited roles', async () => {
     for (const [name, role] of [...SYSTEM_ROLE_KEYS.map((r) => [r, r] as const), ['teamie', 'compliance'] as const]) {
       const m = members[name]!;
-      const a = await withTenantTx(h.app, fx.staffContext(T, m.userId, m.membershipId), (tx) => loadPrincipalAccess(tx));
+      const a = await access(m);
       expect([...a.tenantPermissions].sort(), name).toEqual([...SYSTEM_ROLES[role].permissions].sort());
       expect(a.membershipActive).toBe(true);
     }
@@ -161,7 +163,7 @@ describe('database parity', () => {
     await fx.grantSecurable(h.admin, T.id, sec, { membershipId: m.membershipId, access: 'write', grantedBy: m.membershipId });
     await fx.grantSecurable(h.admin, T.id, sec, { membershipId: m.membershipId, access: 'read', grantedBy: m.membershipId });
     await h.admin.query(`INSERT INTO role_permissions (tenant_id, role_id, permission) VALUES ($1, $2, 'projects.write')`, [T.id, T.roles.read_only]).catch(() => undefined);
-    const a = await withTenantTx(h.app, fx.staffContext(T, m.userId, m.membershipId), (tx) => loadPrincipalAccess(tx));
+    const a = await access(m);
     expect(a.scopedPermissions).toContainEqual({ securableId: sec, permission: 'projects.write' });
     expect(a.restrictedGrants.get(sec)).toBe('write');
     expect(authorize(a, 'projects.write', { securableId: sec, classification: 'restricted' }).allowed).toBe(true);
@@ -171,27 +173,26 @@ describe('database parity', () => {
     await h.admin.query(`INSERT INTO meta.permissions (key, description) VALUES ('legacy.unknown', 'not in registry')`);
     await h.admin.query(`INSERT INTO role_permissions (tenant_id, role_id, permission) VALUES ($1, $2, 'legacy.unknown')`, [T.id, T.roles.read_only]);
     const m = members.read_only!;
-    const a = await withTenantTx(h.app, fx.staffContext(T, m.userId, m.membershipId), (tx) => loadPrincipalAccess(tx));
+    const a = await access(m);
     expect([...a.tenantPermissions]).not.toContain('legacy.unknown');
     await h.admin.query(`UPDATE tenant_memberships SET status = 'suspended' WHERE id = $1`, [m.membershipId]);
-    const b = await withTenantTx(h.app, fx.staffContext(T, m.userId, m.membershipId), (tx) => loadPrincipalAccess(tx));
-    expect(b.membershipActive).toBe(false);
-    expect(authorize(b, 'projects.read').allowed).toBe(false);
+    // Since M1-WP1 a suspended member cannot even establish a context (the DB refuses auth.begin).
+    await expect(access(m)).rejects.toThrow(/Not found/);
   });
 
   it('system roles cannot be edited through the app role, even by an owner', async () => {
     const m = members.owner!;
-    const r = await asApp(h.app, staffSettings(T.id, m.userId, m.membershipId),
+    const r = await asApp(h.app, as(m),
       `INSERT INTO role_permissions (tenant_id, role_id, permission) VALUES ($1, $2, 'restricted.oversight')`, [T.id, T.roles.owner]);
     expect(r.code).toBe('42501');
-    const u = await asApp(h.app, staffSettings(T.id, m.userId, m.membershipId), `UPDATE roles SET name = 'x' WHERE id = $1`, [T.roles.owner]);
+    const u = await asApp(h.app, as(m), `UPDATE roles SET name = 'x' WHERE id = $1`, [T.roles.owner]);
     expect(u.rowCount).toBe(0);
   });
 
   it('a read-only member cannot assign roles to themselves', async () => {
     const m = members.read_only!;
     await h.admin.query(`UPDATE tenant_memberships SET status = 'active' WHERE id = $1`, [m.membershipId]);
-    const r = await asApp(h.app, staffSettings(T.id, m.userId, m.membershipId),
+    const r = await asApp(h.app, as(m),
       `INSERT INTO role_assignments (tenant_id, id, role_id, membership_id) VALUES ($1, gen_random_uuid(), $2, $3)`, [T.id, T.roles.owner, m.membershipId]);
     expect(r.code).toBe('42501');
   });

@@ -13,6 +13,7 @@ export interface TestDatabase {
   adminUrl: string;
   appUrl: string;
   workerUrl: string;
+  authUrl: string;
   migratorUrl: string;
   drop(): Promise<void>;
 }
@@ -34,6 +35,7 @@ export async function createTestDatabase(opts: { probe?: boolean } = {}): Promis
     adminUrl,
     appUrl: roleUrl(env, 'ios_app', name),
     workerUrl: roleUrl(env, 'ios_worker', name),
+    authUrl: roleUrl(env, 'ios_auth', name),
     migratorUrl,
     async drop() {
       const c = new pg.Client({ connectionString: env.adminUrl });

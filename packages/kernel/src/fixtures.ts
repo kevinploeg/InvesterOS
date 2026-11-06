@@ -2,8 +2,9 @@
  * Synthetic fixture builders for tests and the dev seed. They use an ADMIN connection
  * (bypasses RLS) and must never be imported by application code (enforced by dependency-cruiser).
  */
+import { createHash, randomBytes } from 'node:crypto';
 import type pg from 'pg';
-import type { RequestContext } from './context';
+import { SessionCredential } from './db';
 import { newId } from './ids';
 import { SYSTEM_ROLE_KEYS, SYSTEM_ROLES, type SystemRoleKey } from './authz/roles';
 
@@ -91,6 +92,15 @@ export async function grantSecurable(
   return id;
 }
 
-export function staffContext(tenant: { id: string; slug: string }, userId: string, membershipId: string): RequestContext {
-  return { tenantId: tenant.id, tenantSlug: tenant.slug, userId, membershipId, principalType: 'staff', requestId: `test-${newId()}` };
+/**
+ * Creates a live session for a user directly in the database (fixture shortcut for the OIDC login)
+ * and returns its credential. Everything after this goes through auth.begin like a real request.
+ */
+export async function login(admin: Admin, userId: string, o: { expiresInSeconds?: number } = {}): Promise<SessionCredential> {
+  const token = randomBytes(32).toString('base64url');
+  await admin.query(
+    `INSERT INTO sessions (id, token_hash, user_id, expires_at) VALUES ($1, $2, $3, now() + make_interval(secs => $4))`,
+    [newId(), createHash('sha256').update(token).digest(), userId, o.expiresInSeconds ?? 3600],
+  );
+  return new SessionCredential(token);
 }

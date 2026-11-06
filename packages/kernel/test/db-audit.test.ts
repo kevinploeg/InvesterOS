@@ -1,15 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { redact, writeAudit } from '../src/audit';
-import { assertSyntheticDatabase, withAnonymousTx, withTenantTx, withUserTx } from '../src/db';
+import { inspect } from 'node:util';
+import { assertSyntheticDatabase, mapDbError, SessionCredential, withAuthTx, withSystemTx, withTenantTx, withUserTx } from '../src/db';
 import { isUuid, newId } from '../src/ids';
 import { AuthenticationError, NotFoundError } from '../src/errors';
 import * as fx from '../src/fixtures';
-import { asApp, harness, ISSUER, staffSettings, type Harness } from './helpers';
+import { asApp, harness, ISSUER, type As, type Harness } from './helpers';
 
 let h: Harness;
 let T: fx.TenantFixture;
 let userId: string;
 let membershipId: string;
+let cred: SessionCredential;
+const me = (): As => ({ cred, slug: 'audit-co' });
+const SYS = (tenantId: string) => ({ tenantId, principalType: 'system' as const, jobName: 'nightly', requestId: 'job-1' });
 
 beforeAll(async () => {
   h = await harness();
@@ -17,6 +21,7 @@ beforeAll(async () => {
   userId = await fx.createUser(h.admin, { email: 'aud@synthetic.test', displayName: 'Aud', issuer: ISSUER, subject: 'aud' });
   membershipId = await fx.addMembership(h.admin, T.id, userId);
   await fx.assignRole(h.admin, T.id, T.roles.admin, { membershipId });
+  cred = await fx.login(h.admin, userId);
 });
 afterAll(async () => h?.close());
 
@@ -38,22 +43,38 @@ describe('ids and errors', () => {
 });
 
 describe('transaction helpers', () => {
-  it('reject malformed identifiers before touching the database', () => {
-    const ctx = fx.staffContext(T, userId, membershipId);
-    expect(() => withTenantTx(h.app, { ...ctx, tenantId: 'x' }, async () => 1)).toThrow(/invalid tenantId/);
-    expect(() => withTenantTx(h.app, { ...ctx, membershipId: 'x' }, async () => 1)).toThrow(/invalid principal/);
-    expect(() => withUserTx(h.app, 'x', async () => 1)).toThrow(/invalid userId/);
+  it('SessionCredential never serialises the token', () => {
+    const c = new SessionCredential('secret-token-value-that-must-not-leak');
+    expect(JSON.stringify({ c })).not.toContain('secret');
+    expect(String(c)).not.toContain('secret');
+    expect(inspect(c)).not.toContain('secret');
+    expect(c.reveal()).toBe('secret-token-value-that-must-not-leak');
   });
 
-  it('system context sets principal_type=system and no user', async () => {
-    const r = await withTenantTx(h.app, { tenantId: T.id, principalType: 'system', jobName: 'test', requestId: 'r' }, (tx) =>
+  it('withSystemTx rejects malformed tenant ids and only works for ios_worker', async () => {
+    expect(() => withSystemTx(h.worker, { ...SYS(T.id), tenantId: 'x' }, async () => 1)).toThrow(/invalid tenantId/);
+    await expect(withSystemTx(h.app, SYS(T.id), async () => 1)).rejects.toMatchObject({ code: '42501' });
+    const r = await withSystemTx(h.worker, SYS(T.id), (tx) =>
       tx.query(`SELECT app.principal_type() AS p, app.current_user_id() AS u, app.current_tenant() AS t`));
     expect(r.rows[0]).toEqual({ p: 'system', u: null, t: T.id });
   });
 
-  it('anonymous transactions carry no context', async () => {
-    const r = await withAnonymousTx(h.app, (tx) => tx.query(`SELECT app.current_tenant() AS t`));
+  it('withUserTx gives a user-level context without a tenant', async () => {
+    const r = await withUserTx(h.app, cred, (tx, u) => tx.query(`SELECT app.current_tenant() AS t, app.current_user_id() AS u, $1::uuid AS expected`, [u.userId]));
     expect(r.rows[0].t).toBeNull();
+    expect(r.rows[0].u).toBe(r.rows[0].expected);
+  });
+
+  it('withAuthTx carries no context', async () => {
+    const r = await withAuthTx(h.auth, (tx) => tx.query(`SELECT 1 AS one`));
+    expect(r.rows[0].one).toBe(1);
+  });
+
+  it('mapDbError maps IOS01/IOS04 and passes everything else through', () => {
+    expect(mapDbError({ code: 'IOS01' })).toBeInstanceOf(AuthenticationError);
+    expect(mapDbError({ code: 'IOS04' })).toBeInstanceOf(NotFoundError);
+    const other = { code: '23505' };
+    expect(mapDbError(other)).toBe(other);
   });
 });
 
@@ -68,20 +89,17 @@ describe('synthetic-data guard (M0-AC16)', () => {
 
 describe('audit (M0-AC7)', () => {
   it('writes user and system events in the same transaction, redacting PII keys', async () => {
-    const ctx = fx.staffContext(T, userId, membershipId);
-    const id = await withTenantTx(h.app, ctx, (tx) =>
+    const id = await withTenantTx(h.app, cred, 'audit-co', 'write', (tx, ctx) =>
       writeAudit(tx, ctx, { action: 'iam.member.invited', targetType: 'membership', targetId: membershipId, changes: { email: 'p@synthetic.test', role: 'admin' } }));
-    const sys = await withTenantTx(h.app, { tenantId: T.id, principalType: 'system', jobName: 'nightly', requestId: 'job-1' }, (tx) =>
-      writeAudit(tx, { tenantId: T.id, principalType: 'system', jobName: 'nightly', requestId: 'job-1' }, { action: 'system.check.ran' }));
+    const sys = await withSystemTx(h.worker, SYS(T.id), (tx) => writeAudit(tx, SYS(T.id), { action: 'system.check.ran' }));
     const r = await h.admin.query('SELECT id, actor_type, actor_label, changes FROM audit_events WHERE id = ANY($1) ORDER BY seq', [[id, sys]]);
     expect(r.rows[0]).toMatchObject({ actor_type: 'user', changes: { email: '[redacted]', role: 'admin' } });
     expect(r.rows[1]).toMatchObject({ actor_type: 'system', actor_label: 'system:nightly' });
   });
 
   it('a rolled-back change leaves no audit record (atomic with the change)', async () => {
-    const ctx = fx.staffContext(T, userId, membershipId);
     let id = '';
-    await expect(withTenantTx(h.app, ctx, async (tx) => {
+    await expect(withTenantTx(h.app, cred, 'audit-co', 'write', async (tx, ctx) => {
       id = await writeAudit(tx, ctx, { action: 'test.rolled_back' });
       throw new Error('change failed');
     })).rejects.toThrow('change failed');
@@ -89,7 +107,7 @@ describe('audit (M0-AC7)', () => {
   });
 
   it('is append-only: UPDATE/DELETE fail for the app and even for the owner role', async () => {
-    const s = staffSettings(T.id, userId, membershipId);
+    const s = me();
     expect((await asApp(h.app, s, `UPDATE audit_events SET action = 'x.y'`)).code).toBe('42501');
     expect((await asApp(h.app, s, `DELETE FROM audit_events`)).code).toBe('42501');
     await expect(h.admin.query(`UPDATE audit_events SET action = 'x.y'`)).rejects.toThrow(/append-only/);
@@ -98,7 +116,7 @@ describe('audit (M0-AC7)', () => {
   });
 
   it('users cannot forge system events or events attributed to someone else', async () => {
-    const s = staffSettings(T.id, userId, membershipId);
+    const s = me();
     const other = await fx.addMembership(h.admin, T.id, await fx.createUser(h.admin, { email: 'o@synthetic.test', displayName: 'O', issuer: ISSUER, subject: 'o' }));
     expect((await asApp(h.app, s, `INSERT INTO audit_events (tenant_id, id, actor_type, actor_label, action) VALUES ($1, gen_random_uuid(), 'system', 'system:x', 'a.b')`, [T.id])).code).toBe('42501');
     expect((await asApp(h.app, s, `INSERT INTO audit_events (tenant_id, id, actor_type, actor_membership_id, action) VALUES ($1, gen_random_uuid(), 'user', $2, 'a.b')`, [T.id, other])).code).toBe('42501');

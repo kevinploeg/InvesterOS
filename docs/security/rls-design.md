@@ -14,13 +14,33 @@ Status: **implemented in M0**. It is tested by `packages/kernel/test/{isolation,
 
 **No role in this system has BYPASSRLS or SUPERUSER.** That also works on AWS RDS, where creating BYPASSRLS roles is restricted. Schema-lint rule R5 enforces it.
 
-## 2. Request context
+## 2. Request context (DB-verified since M1-WP1)
 
-`withTenantTx(pool, ctx, fn)` opens a transaction and sets `app.tenant_id`, `app.user_id`, `app.membership_id` and `app.principal_type` with `set_config(..., true)`, which makes them transaction-local. There is no other route to tenant data. `pg` is banned outside `kernel/db` by both ESLint and dependency-cruiser.
+Every transaction starts with `SELECT * FROM auth.begin(<raw session token>, <tenant slug | NULL>, 'read'|'write')`. This is done by `withTenantTx` / `withUserTx`.
 
-- No context: `app.current_tenant()` returns NULL and every policy evaluates false, so zero rows are returned (tested on every table).
-- A malformed value raises a cast error (fail closed, tested).
-- After COMMIT or ROLLBACK the connection has no context left (tested with pool size 1).
+What `auth.begin` (SECURITY DEFINER, owned by `ios_definer`) does:
+1. Hashes the token.
+2. Checks the session (not revoked, not expired, idle window), the user (active), the tenant (active) and the membership (active, staff).
+3. Writes the resulting context into **`pg_temp.ios_tx_context`**:
+   - a temp table private to the connection;
+   - owned by `ios_definer`;
+   - `ON COMMIT DELETE ROWS`;
+   - at most one row per transaction.
+
+The policy functions (`app.current_tenant()`, `current_user_id()`, `current_membership()`, `principal_type()`) read **only** that table. GUCs and `set_config` play no part any more (schema-lint R9).
+
+| Property | Mechanism | Test |
+|---|---|---|
+| Context cannot be spoofed via SQL | Readers ignore GUCs; request roles have no TEMPORARY privilege, so they cannot create, shadow, read or write the store | `context-safety.test.ts` |
+| No stale context | `ON COMMIT DELETE ROWS` + rollback semantics; autocommit = one statement | idem |
+| Connection reuse (pool, PgBouncer transaction/session mode) | The store is per connection and empty outside a transaction; `DISCARD ALL` simply recreates it | idem (pool of 1, 200 interleaved transactions over 8 connections) |
+| No identity switch within a transaction | Primary key on a singleton column → second `auth.begin` = `IOS09` | idem |
+| Savepoint rollback | Context established inside it disappears (fail closed) | idem |
+| Sessions can't be minted through `ios_app` | Only `ios_auth` can call `auth.create_session`; `ios_app` has no privileges on `sessions` | `auth.test.ts` |
+
+Not supported: PgBouncer **statement** mode (a transaction spans several statements) and two-phase commit. The latter is refused by Postgres.
+
+Errors: `IOS01` → HTTP 401 (no valid session), `IOS04` → HTTP 404 (tenant/membership not accessible, no disclosure).
 
 ## 3. Policy pattern
 
@@ -74,17 +94,17 @@ Policies call helper functions as a scalar sub-select, e.g. `(SELECT app.granted
 
 A holder of `access.manage` (owner or admin) can grant **themselves** access. This is attributable (`granted_by` is enforced) and tested. From M2, a grant on a restricted securable requires a four-eyes approval request, and self-grants are refused.
 
-## 5. Pre-login paths
+## 5. Pre-context paths
 
-`auth.resolve_identity(issuer, subject)` and `auth.lookup_session(token_hash, idle_seconds)` are SECURITY DEFINER functions owned by `ios_definer`:
+- `auth.create_session(issuer, subject, token, previous_token)`: only for the `ios_auth` login (OIDC callback, **after** the app validated the ID token).
+- `auth.begin` / `auth.revoke_current_session`: `ios_app` and `ios_worker`.
+- `auth.begin_system`: only when `session_user = 'ios_worker'`.
 
-- with a pinned `search_path`;
-- executable only by `ios_app` (rule R8: no PUBLIC EXECUTE);
-- `ios_definer` itself has no BYPASSRLS and sees only `users`, `user_identities` and `sessions` through dedicated policies.
+All are SECURITY DEFINER with a pinned `search_path`, owned by `ios_definer`, which has NO BYPASSRLS. Its reach is limited to explicit policies on `users`, `user_identities`, `sessions`, `tenants` and `tenant_memberships` (schema-lint R10).
 
 ## 6. Known limitations and how they are handled
 
-1. **Context spoofing through SQL.** `set_config` can be called by anyone who can execute arbitrary SQL as `ios_app`. RLS protects against **bugs in queries** (a forgotten `WHERE`, a wrong join). It does not protect against **SQL injection with arbitrary statements**. Mitigations: parameterised queries only (no string concatenation, a lint rule from M1), no raw `pg` outside the kernel, and least privilege (the app has no DDL and owns nothing). A signed context, verified by a definer function, is a possible extra layer. It isn't proposed yet because the cost and complexity are high for marginal gain.
+1. **Context spoofing through SQL: fixed in M1-WP1** (§2). Remaining: anyone who can execute SQL as `ios_app` **and** holds a valid session token acts with that token's rights, i.e. their own. A compromised application server sees every token in transit; no DB mechanism can prevent that.
 2. **Referential integrity checks bypass RLS** (Postgres behaviour). Every cross-tenant FK is composite, so a reference can never point outside the tenant. Within a tenant, the existence-oracle test above covers it.
 3. **Background jobs** use `ios_worker` and the same policies. A job acting on behalf of a user is re-authorized when it runs. A `system` job has `principal_type = 'system'` and only reaches what system policies explicitly allow. In M0 that is only writing system audit events.
 4. **AI retrieval (future).** Embedding tables carry `tenant_id` and `securable_id` and the same policies. Retrieval runs in the user's context, never as a system principal.

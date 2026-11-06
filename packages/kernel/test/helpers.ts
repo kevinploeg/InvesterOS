@@ -1,11 +1,13 @@
 import pg from 'pg';
 import { createTestDatabase, type TestDatabase } from '@investoros/db';
-import { createPool } from '../src/db';
+import { createPool, type SessionCredential, type TxMode } from '../src/db';
 
 export interface Harness {
   db: TestDatabase;
   admin: pg.Client;
   app: pg.Pool;
+  worker: pg.Pool;
+  auth: pg.Pool;
   close(): Promise<void>;
 }
 
@@ -14,12 +16,16 @@ export async function harness(opts: { probe?: boolean } = {}): Promise<Harness> 
   const admin = new pg.Client({ connectionString: db.adminUrl });
   await admin.connect();
   const app = createPool(db.appUrl, 4);
+  const worker = createPool(db.workerUrl, 2);
+  const auth = createPool(db.authUrl, 2);
   return {
     db,
     admin,
     app,
+    worker,
+    auth,
     async close() {
-      await app.end();
+      await Promise.all([app.end(), worker.end(), auth.end()]);
       await admin.end();
       await db.drop();
     },
@@ -28,18 +34,21 @@ export async function harness(opts: { probe?: boolean } = {}): Promise<Harness> 
 
 export const ISSUER = 'https://idp.synthetic.test';
 
-/** Runs a raw statement as ios_app with an arbitrary context; returns rowCount or the SQLSTATE of the error. */
-export async function asApp(
-  pool: pg.Pool,
-  settings: Record<string, string>,
-  sql: string,
-  params: unknown[] = [],
-): Promise<{ rows: Record<string, unknown>[]; rowCount: number; code?: undefined } | { code: string; rows: []; rowCount: 0 }> {
+/** Who runs a raw statement: a credential (+ tenant slug, or null for user-level), or nobody. */
+export type As = { cred: SessionCredential; slug: string | null; mode?: TxMode } | null;
+
+type Result = { rows: Record<string, unknown>[]; rowCount: number; code?: undefined } | { code: string; rows: []; rowCount: 0 };
+
+/**
+ * Runs a raw statement as ios_app exactly like a request would: BEGIN, auth.begin(token, slug), statement,
+ * ROLLBACK. Returns rows/rowCount, or the SQLSTATE of the first error (from auth.begin or the statement).
+ */
+export async function asApp(pool: pg.Pool, as: As, sql: string, params: unknown[] = []): Promise<Result> {
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
-    for (const [k, v] of Object.entries(settings)) await c.query('SELECT set_config($1, $2, true)', [k, v]);
     try {
+      if (as) await c.query('SELECT auth.begin($1, $2, $3)', [as.cred.reveal(), as.slug, as.mode ?? 'write']);
       const r = await c.query(sql, params);
       return { rows: r.rows, rowCount: r.rowCount ?? 0 };
     } catch (e) {
@@ -50,10 +59,3 @@ export async function asApp(
     c.release();
   }
 }
-
-export const staffSettings = (tenantId: string, userId: string, membershipId: string): Record<string, string> => ({
-  'app.tenant_id': tenantId,
-  'app.user_id': userId,
-  'app.membership_id': membershipId,
-  'app.principal_type': 'staff',
-});

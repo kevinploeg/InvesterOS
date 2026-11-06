@@ -64,6 +64,29 @@ describe('schema-lint (M0-AC5)', () => {
   });
 });
 
+describe('schema-lint M1-WP1 rules', () => {
+  it('R9 detects a policy or function that trusts a GUC; R11 detects TEMPORARY for a request role; R10 definer scope', async () => {
+    await admin.query('BEGIN');
+    try {
+      await admin.query(`SET ROLE ios_owner`);
+      await admin.query(`CREATE FUNCTION app.bad_ctx() RETURNS uuid LANGUAGE sql AS $$ SELECT current_setting('app.tenant_id')::uuid $$`);
+      await admin.query(`CREATE POLICY teams_guc ON teams FOR SELECT TO ios_app USING (current_setting('app.x', true) = 'y')`);
+      await admin.query(`CREATE POLICY teams_definer ON teams FOR SELECT TO ios_definer USING (true)`);
+      await admin.query('RESET ROLE');
+      await admin.query(`GRANT TEMPORARY ON DATABASE ${db.name} TO ios_app`);
+      const rules = (await lintSchema(admin)).map((x) => `${x.rule}:${x.object}`);
+      expect(rules).toEqual(expect.arrayContaining([
+        'R9-no-guc-identity:app.bad_ctx()',
+        'R9-no-guc-identity:teams.teams_guc',
+        'R10-definer-scope:teams.teams_definer',
+        'R11-no-temp-for-request-roles:ios_app',
+      ]));
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+  });
+});
+
 describe('migrations', () => {
   it('are idempotent and refuse a modified applied migration', async () => {
     expect(await migrate(db.migratorUrl)).toEqual([]);

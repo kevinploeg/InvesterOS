@@ -1,17 +1,18 @@
 import { getTranslations } from 'next-intl/server';
-import { listMemberships } from '@investoros/kernel/auth';
+import { notFound, redirect } from 'next/navigation';
 import { loadPrincipalAccess } from '@investoros/kernel/authz';
 import { withTenantTx } from '@investoros/kernel/db';
 import { appPool } from '@/server/runtime';
-import { requireTenantContext } from '@/server/session';
+import { requireCredential } from '@/server/session';
 
 export const dynamic = 'force-dynamic';
 
 export default async function TenantHome({ params }: { params: Promise<{ tenant: string }> }) {
   const { tenant } = await params;
-  const { session, ctx } = await requireTenantContext(tenant);
+  const { credential, session } = await requireCredential();
   const t = await getTranslations('workspace');
-  const data = await withTenantTx(appPool(), ctx, async (tx) => {
+  // The database validates the session AND the membership for this slug (auth.begin).
+  const data = await withTenantTx(appPool(), credential, tenant, 'read', async (tx, ctx) => {
     const access = await loadPrincipalAccess(tx);
     const me = await tx.query<{ display_name: string }>('SELECT display_name FROM users WHERE id = $1', [ctx.userId]);
     const tn = await tx.query<{ name: string }>('SELECT name FROM tenants WHERE id = $1', [ctx.tenantId]);
@@ -22,8 +23,12 @@ export default async function TenantHome({ params }: { params: Promise<{ tenant:
       `SELECT t.name FROM teams t JOIN team_members tm ON tm.tenant_id = t.tenant_id AND tm.team_id = t.id
        WHERE tm.membership_id = $1 ORDER BY t.name`, [ctx.membershipId]);
     return { access, me: me.rows[0]?.display_name ?? '', tenantName: tn.rows[0]?.name ?? '', roles: roles.rows.map((r) => r.name), teams: teams.rows.map((r) => r.name) };
+  }).catch((e: Error) => {
+    if (e.name === 'NotFoundError') notFound();
+    if (e.name === 'AuthenticationError') redirect('/login');
+    throw e;
   });
-  const memberships = await listMemberships(appPool(), session.userId);
+  const memberships = session.memberships;
 
   return (
     <main>

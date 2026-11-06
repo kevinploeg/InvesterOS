@@ -12,6 +12,7 @@ export interface RolePasswords {
   app: string;
   migrator: string;
   worker: string;
+  auth: string;
 }
 
 /**
@@ -29,6 +30,7 @@ export async function bootstrap(adminUrl: string, database: string, passwords: R
       ['ios_app', passwords.app],
       ['ios_migrator', passwords.migrator],
       ['ios_worker', passwords.worker],
+      ['ios_auth', passwords.auth],
     ] as const) {
       await admin.query(`ALTER ROLE ${role} PASSWORD ${admin.escapeLiteral(pw)}`);
     }
@@ -37,7 +39,10 @@ export async function bootstrap(adminUrl: string, database: string, passwords: R
       await admin.query(`CREATE DATABASE ${database} OWNER ios_owner`);
     }
     await admin.query(`REVOKE ALL ON DATABASE ${database} FROM PUBLIC`);
-    await admin.query(`GRANT CONNECT ON DATABASE ${database} TO ios_app, ios_worker, ios_migrator`);
+    await admin.query(`GRANT CONNECT ON DATABASE ${database} TO ios_app, ios_worker, ios_migrator, ios_auth`);
+    // ios_definer holds the per-connection request-context temp table (see migration 0004).
+    // Request roles deliberately do NOT get TEMPORARY: they cannot create or shadow temp objects.
+    await admin.query(`GRANT TEMPORARY ON DATABASE ${database} TO ios_definer`);
     await admin.query(`GRANT CONNECT, TEMPORARY ON DATABASE ${database} TO ios_owner`);
   } finally {
     await admin.end();

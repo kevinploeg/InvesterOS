@@ -3,7 +3,7 @@ export interface DbEnv {
   adminUrl: string;
   host: string;
   port: number;
-  passwords: { app: string; migrator: string; worker: string };
+  passwords: { app: string; migrator: string; worker: string; auth: string };
 }
 
 export function dbEnv(env: NodeJS.ProcessEnv = process.env): DbEnv {
@@ -17,12 +17,15 @@ export function dbEnv(env: NodeJS.ProcessEnv = process.env): DbEnv {
       app: env.IOS_APP_PASSWORD ?? 'dev_app_password',
       migrator: env.IOS_MIGRATOR_PASSWORD ?? 'dev_migrator_password',
       worker: env.IOS_WORKER_PASSWORD ?? 'dev_worker_password',
+      auth: env.IOS_AUTH_PASSWORD ?? 'dev_auth_password',
     },
   };
 }
 
-export function roleUrl(env: DbEnv, role: 'ios_app' | 'ios_worker' | 'ios_migrator', database: string): string {
-  const pw = role === 'ios_app' ? env.passwords.app : role === 'ios_worker' ? env.passwords.worker : env.passwords.migrator;
+export type LoginRole = 'ios_app' | 'ios_worker' | 'ios_migrator' | 'ios_auth';
+
+export function roleUrl(env: DbEnv, role: LoginRole, database: string): string {
+  const pw = { ios_app: env.passwords.app, ios_worker: env.passwords.worker, ios_migrator: env.passwords.migrator, ios_auth: env.passwords.auth }[role];
   return `postgres://${role}:${encodeURIComponent(pw)}@${env.host}:${env.port}/${database}`;
 }
 

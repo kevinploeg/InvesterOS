@@ -1,28 +1,26 @@
 import 'server-only';
-import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
-import { notFound, redirect } from 'next/navigation';
-import { getSession, resolveTenantContext, sessionCookieName, type Session } from '@investoros/kernel/auth';
-import type { RequestContext } from '@investoros/kernel/context';
+import { redirect } from 'next/navigation';
+import { getSessionView, sessionCookieName, type SessionView } from '@investoros/kernel/auth';
+import { SessionCredential } from '@investoros/kernel/db';
 import { appPool, authConfig, ensureSynthetic } from './runtime';
 
-export async function currentSession(): Promise<Session | null> {
-  await ensureSynthetic();
+/** The raw cookie wrapped so it cannot be logged or serialised by accident. */
+export async function currentCredential(): Promise<SessionCredential | undefined> {
   const token = (await cookies()).get(sessionCookieName(authConfig()))?.value;
-  return getSession(appPool(), authConfig(), token);
+  return token ? new SessionCredential(token) : undefined;
+}
+
+/** Validated by the database (auth.begin). Null = no valid session. */
+export async function currentSession(): Promise<SessionView | null> {
+  await ensureSynthetic();
+  return getSessionView(appPool(), await currentCredential());
 }
 
 /** Pages: redirect to login when unauthenticated. */
-export async function requireSession(): Promise<Session> {
-  const s = await currentSession();
-  if (!s) redirect('/login');
-  return s;
-}
-
-/** Pages under /t/[tenant]: the slug must match an active membership, else 404 (never 403). */
-export async function requireTenantContext(slug: string): Promise<{ session: Session; ctx: RequestContext }> {
-  const session = await requireSession();
-  const ctx = await resolveTenantContext(appPool(), session, slug, randomUUID());
-  if (!ctx) notFound();
-  return { session, ctx };
+export async function requireCredential(): Promise<{ credential: SessionCredential; session: SessionView }> {
+  const credential = await currentCredential();
+  const session = await currentSession();
+  if (!credential || !session) redirect('/login');
+  return { credential, session };
 }

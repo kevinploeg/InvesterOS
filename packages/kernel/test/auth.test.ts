@@ -2,9 +2,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startMockOidc, type MockOidc } from '@investoros/mock-oidc';
 import {
-  beginLogin, completeLogin, createSession, getSession, hashToken, listMemberships, loadAuthConfig, oidcConfiguration,
-  openState, resolveIdentity, resolveTenantContext, revokeSession, sealState, sessionCookieName, stateCookieName, type AuthConfig,
+  beginLogin, completeLogin, createSession, getSessionView, loadAuthConfig, oidcConfiguration,
+  openState, revokeSession, sealState, sessionCookieName, stateCookieName, type AuthConfig,
 } from '../src/auth';
+import { SessionCredential, withTenantTx } from '../src/db';
 import { AuthenticationError } from '../src/errors';
 import * as fx from '../src/fixtures';
 import { harness, type Harness } from './helpers';
@@ -25,7 +26,6 @@ const envFor = (issuer: string, extra: Record<string, string> = {}): NodeJS.Proc
   OIDC_CLIENT_SECRET: 'test-secret',
   APP_BASE_URL: BASE,
   AUTH_STATE_SECRET: 'x'.repeat(48),
-  SESSION_IDLE_MINUTES: '30',
   ...extra,
 });
 
@@ -61,8 +61,6 @@ afterAll(async () => {
 describe('config', () => {
   it('derives redirect URI, TTLs and cookie names; secure cookies over https', () => {
     expect(cfg.redirectUri).toBe(`${BASE}/auth/callback`);
-    expect(cfg.idleSeconds).toBe(1800);
-    expect(cfg.absoluteTtlMs).toBe(12 * 3_600_000);
     expect(cfg.secureCookies).toBe(false);
     expect(sessionCookieName(cfg)).toBe('ios_session');
     const secure = loadAuthConfig(envFor('https://idp.example', { APP_BASE_URL: 'https://app.example' }));
@@ -112,7 +110,7 @@ describe('OIDC authorization code + PKCE (M0-AC8)', () => {
     const { callback, stateCookie } = await idpRoundTrip(cfg, 'alice');
     const id = await completeLogin(cfg, callback, stateCookie);
     expect(id).toEqual({ issuer: idp.issuer, subject: 'alice', amr: ['pwd', 'mfa'] });
-    expect(await resolveIdentity(h.app, id.issuer, id.subject)).toBe(aliceId);
+    expect((await createSession(h.auth, id.issuer, id.subject))?.userId).toBe(aliceId);
   });
 
   it('rejects a callback without, or with a mismatching, state cookie', async () => {
@@ -133,95 +131,126 @@ describe('OIDC authorization code + PKCE (M0-AC8)', () => {
     const { callback, stateCookie } = await idpRoundTrip(c2, 'alice');
     const id = await completeLogin(c2, callback, stateCookie);
     expect(id.amr).toEqual([]); // amr claim absent
-    expect(await resolveIdentity(h.app, id.issuer, id.subject)).toBeNull();
+    expect(await createSession(h.auth, id.issuer, id.subject)).toBeNull();
   });
 
-  it('disabled users and unknown subjects resolve to nobody', async () => {
-    expect(await resolveIdentity(h.app, idp.issuer, 'disabled')).toBeNull();
-    expect(await resolveIdentity(h.app, idp.issuer, 'mallory')).toBeNull();
+  it('disabled users and unknown subjects get no session', async () => {
+    expect(await createSession(h.auth, idp.issuer, 'disabled')).toBeNull();
+    expect(await createSession(h.auth, idp.issuer, 'mallory')).toBeNull();
   });
 });
 
-describe('sessions (M0-AC10)', () => {
-  it('create → get → revoke; token stored only as a hash', async () => {
-    const { token, session } = await createSession(h.app, cfg, aliceId);
-    expect(session.activeTenantId).toBe(A.id); // first by slug
-    const stored = await h.admin.query('SELECT token_hash FROM sessions WHERE id = $1', [session.sessionId]);
-    expect(Buffer.compare(stored.rows[0].token_hash, hashToken(token))).toBe(0);
-    expect(JSON.stringify(stored.rows)).not.toContain(token);
-    const got = await getSession(h.app, cfg, token);
-    expect(got).toMatchObject({ sessionId: session.sessionId, userId: aliceId, activeMembershipId: aliceA });
-    await revokeSession(h.app, got!);
-    expect(await getSession(h.app, cfg, token)).toBeNull();
+const view = (c: SessionCredential | undefined) => getSessionView(h.app, c);
+
+describe('sessions (M0-AC10, enforced in the database since M1-WP1)', () => {
+  it('create → view → revoke; token stored only as a hash', async () => {
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    expect(s.activeTenantSlug).toBe('alpha-capital'); // first by slug
+    const stored = await h.admin.query('SELECT token_hash FROM sessions WHERE id = $1', [s.sessionId]);
+    expect(stored.rows[0].token_hash).toHaveLength(32);
+    expect(JSON.stringify(stored.rows)).not.toContain(s.credential.reveal());
+    const v = await view(s.credential);
+    expect(v).toMatchObject({ sessionId: s.sessionId, userId: aliceId, activeTenantSlug: 'alpha-capital' });
+    await revokeSession(h.app, s.credential);
+    expect(await view(s.credential)).toBeNull();
+    await expect(revokeSession(h.app, s.credential)).rejects.toThrow(/No valid session/);
   });
 
   it('rotation: a new login revokes the previous session token', async () => {
-    const first = await createSession(h.app, cfg, aliceId);
-    const second = await createSession(h.app, cfg, aliceId, first.token);
-    expect(await getSession(h.app, cfg, first.token)).toBeNull();
-    expect(await getSession(h.app, cfg, second.token)).not.toBeNull();
+    const first = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    const second = (await createSession(h.auth, idp.issuer, 'alice', first.credential))!;
+    expect(await view(first.credential)).toBeNull();
+    expect(await view(second.credential)).not.toBeNull();
   });
 
-  it('idle timeout and absolute expiry', async () => {
-    const idle = await createSession(h.app, cfg, aliceId);
-    await h.admin.query(`UPDATE sessions SET last_seen_at = now() - interval '31 minutes' WHERE id = $1`, [idle.session.sessionId]);
-    expect(await getSession(h.app, cfg, idle.token)).toBeNull();
-    const old = await createSession(h.app, cfg, aliceId);
-    await h.admin.query(`UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1`, [old.session.sessionId]);
-    expect(await getSession(h.app, cfg, old.token)).toBeNull();
+  it('idle timeout and absolute expiry are database policy', async () => {
+    const idle = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    await h.admin.query(`UPDATE sessions SET last_seen_at = now() - interval '31 minutes' WHERE id = $1`, [idle.sessionId]);
+    expect(await view(idle.credential)).toBeNull();
+    const old = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    await h.admin.query(`UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = $1`, [old.sessionId]);
+    expect(await view(old.credential)).toBeNull();
+  });
+
+  it('idle tracking writes last_seen_at at most once per 60 s', async () => {
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    await h.admin.query(`UPDATE sessions SET last_seen_at = now() - interval '30 seconds' WHERE id = $1`, [s.sessionId]);
+    const before = (await h.admin.query('SELECT last_seen_at FROM sessions WHERE id = $1', [s.sessionId])).rows[0].last_seen_at;
+    await view(s.credential);
+    expect((await h.admin.query('SELECT last_seen_at FROM sessions WHERE id = $1', [s.sessionId])).rows[0].last_seen_at).toEqual(before);
+    await h.admin.query(`UPDATE sessions SET last_seen_at = now() - interval '5 minutes' WHERE id = $1`, [s.sessionId]);
+    await view(s.credential);
+    const after = (await h.admin.query('SELECT last_seen_at > now() - interval \'5 seconds\' AS fresh FROM sessions WHERE id = $1', [s.sessionId])).rows[0];
+    expect(after.fresh).toBe(true);
   });
 
   it('a disabled user loses all sessions immediately', async () => {
-    const s = await createSession(h.app, cfg, aliceId);
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
     await h.admin.query(`UPDATE users SET status = 'disabled' WHERE id = $1`, [aliceId]);
     try {
-      expect(await getSession(h.app, cfg, s.token)).toBeNull();
+      expect(await view(s.credential)).toBeNull();
     } finally {
       await h.admin.query(`UPDATE users SET status = 'active' WHERE id = $1`, [aliceId]);
     }
   });
 
-  it('garbage tokens are rejected without a lookup', async () => {
-    expect(await getSession(h.app, cfg, undefined)).toBeNull();
-    expect(await getSession(h.app, cfg, 'short')).toBeNull();
-    expect(await getSession(h.app, cfg, 'x'.repeat(200))).toBeNull();
-    expect(await getSession(h.app, cfg, 'x'.repeat(43))).toBeNull();
+  it('garbage tokens are rejected', async () => {
+    expect(await view(undefined)).toBeNull();
+    expect(await view(new SessionCredential('short'))).toBeNull();
+    expect(await view(new SessionCredential('x'.repeat(200)))).toBeNull();
+    expect(await view(new SessionCredential('x'.repeat(43)))).toBeNull();
+  });
+
+  it('only the ios_auth login can create sessions', async () => {
+    const r = await h.app.query(`SELECT * FROM auth.create_session($1, 'alice', $2, NULL)`, [idp.issuer, 'y'.repeat(43)]).catch((e) => e);
+    expect(r.code).toBe('42501');
+    const w = await h.worker.query(`SELECT * FROM auth.create_session($1, 'alice', $2, NULL)`, [idp.issuer, 'y'.repeat(43)]).catch((e) => e);
+    expect(w.code).toBe('42501');
+    const bad = await h.auth.query(`SELECT * FROM auth.create_session($1, 'alice', 'short', NULL)`, [idp.issuer]).catch((e) => e);
+    expect(bad.code).toBe('22023');
   });
 
   it('a user without memberships gets a session without an active tenant', async () => {
-    const lonely = await fx.createUser(h.admin, { email: 'lonely@synthetic.test', displayName: 'L', issuer: idp.issuer, subject: 'lonely' });
-    const { session } = await createSession(h.app, cfg, lonely);
-    expect(session.activeTenantId).toBeNull();
-    expect(await listMemberships(h.app, lonely)).toEqual([]);
+    await fx.createUser(h.admin, { email: 'lonely@synthetic.test', displayName: 'L', issuer: idp.issuer, subject: 'lonely' });
+    const s = (await createSession(h.auth, idp.issuer, 'lonely'))!;
+    expect(s.activeTenantSlug).toBeNull();
+    expect((await view(s.credential))?.memberships).toEqual([]);
   });
 });
 
-describe('tenant resolution (M0-AC15, M1 groundwork for multi-membership)', () => {
+describe('tenant resolution (M0-AC15) — now decided by auth.begin in the database', () => {
   it('lists active memberships across tenants', async () => {
-    const ms = await listMemberships(h.app, aliceId);
-    expect(ms.map((m) => m.tenantSlug)).toEqual(['alpha-capital', 'beta-partners']);
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    expect((await view(s.credential))?.memberships.map((m) => m.tenantSlug)).toEqual(['alpha-capital', 'beta-partners']);
   });
 
-  it('resolves a member slug, switches the active tenant, and returns null for anything else', async () => {
-    const { token } = await createSession(h.app, cfg, aliceId);
-    const s = (await getSession(h.app, cfg, token))!;
-    const ctxA = await resolveTenantContext(h.app, s, 'alpha-capital', 'req-1');
-    expect(ctxA).toMatchObject({ tenantId: A.id, membershipId: aliceA, userId: aliceId, principalType: 'staff', requestId: 'req-1' });
-    const ctxB = await resolveTenantContext(h.app, s, 'beta-partners', 'req-2');
-    expect(ctxB?.tenantId).toBe(B.id);
-    expect((await getSession(h.app, cfg, token))?.activeTenantId).toBe(B.id);
-    expect(await resolveTenantContext(h.app, s, 'gamma-ventures', 'req-3')).toBeNull();
-    expect(await resolveTenantContext(h.app, s, '../etc', 'req-4')).toBeNull();
+  it('a member slug yields a DB-established context; anything else is NotFound', async () => {
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    const ctxA = await withTenantTx(h.app, s.credential, 'alpha-capital', 'read', async (_tx, ctx) => ctx, 'req-1');
+    expect(ctxA).toMatchObject({ tenantId: A.id, membershipId: aliceA, userId: aliceId, principalType: 'staff', requestId: 'req-1', sessionId: s.sessionId });
+    expect((await withTenantTx(h.app, s.credential, 'beta-partners', 'read', async (_tx, ctx) => ctx)).tenantId).toBe(B.id);
+    await expect(withTenantTx(h.app, s.credential, 'gamma-ventures', 'read', async () => 1)).rejects.toThrow(/Not found/);
+    await expect(withTenantTx(h.app, s.credential, '../etc', 'read', async () => 1)).rejects.toThrow(/Not found/);
   });
 
   it('a suspended membership or suspended tenant no longer resolves', async () => {
-    const { token } = await createSession(h.app, cfg, aliceId);
-    const s = (await getSession(h.app, cfg, token))!;
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
     await h.admin.query(`UPDATE tenants SET status = 'suspended' WHERE id = $1`, [B.id]);
-    expect(await resolveTenantContext(h.app, s, 'beta-partners', 'r')).toBeNull();
+    await expect(withTenantTx(h.app, s.credential, 'beta-partners', 'read', async () => 1)).rejects.toThrow(/Not found/);
     await h.admin.query(`UPDATE tenants SET status = 'active' WHERE id = $1`, [B.id]);
     await h.admin.query(`UPDATE tenant_memberships SET status = 'suspended' WHERE id = $1`, [aliceA]);
-    expect(await resolveTenantContext(h.app, s, 'alpha-capital', 'r')).toBeNull();
+    await expect(withTenantTx(h.app, s.credential, 'alpha-capital', 'read', async () => 1)).rejects.toThrow(/Not found/);
     await h.admin.query(`UPDATE tenant_memberships SET status = 'active' WHERE id = $1`, [aliceA]);
+  });
+
+  it('a revoked session yields AuthenticationError, not NotFound', async () => {
+    const s = (await createSession(h.auth, idp.issuer, 'alice'))!;
+    await revokeSession(h.app, s.credential);
+    await expect(withTenantTx(h.app, s.credential, 'alpha-capital', 'read', async () => 1)).rejects.toThrow(/No valid session/);
+  });
+
+  it('getSessionView propagates unexpected errors', async () => {
+    const broken = { connect: async () => { throw new Error('db down'); } } as unknown as import('pg').Pool;
+    await expect(getSessionView(broken, new SessionCredential('z'.repeat(43)))).rejects.toThrow('db down');
   });
 });

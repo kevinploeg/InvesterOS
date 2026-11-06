@@ -54,6 +54,7 @@ jobs:
       - name: Build web
         env:
           DATABASE_URL: postgres://ios_app:dev_app_password@127.0.0.1:5432/investoros_e2e
+          DATABASE_AUTH_URL: postgres://ios_auth:dev_auth_password@127.0.0.1:5432/investoros_e2e
           OIDC_ISSUER: http://127.0.0.1:4010
           OIDC_CLIENT_ID: investoros-web
           OIDC_CLIENT_SECRET: e2e-client-secret

@@ -4,16 +4,27 @@ import { createPool, assertSyntheticDatabase } from '@investoros/kernel/db';
 import { loadAuthConfig, type AuthConfig } from '@investoros/kernel/auth';
 
 let pool: pg.Pool | undefined;
+let authPool: pg.Pool | undefined;
 let auth: AuthConfig | undefined;
 let guard: Promise<void> | undefined;
 
-/** ios_app pool. Never a privileged role. */
+function poolFor(envName: string, role: string): pg.Pool {
+  const url = process.env[envName];
+  if (!url) throw new Error(`${envName} missing`);
+  if (!new RegExp(`^postgres(ql)?://${role}[:@]`).test(url)) throw new Error(`${envName} must use the ${role} role`);
+  return createPool(url);
+}
+
+/** ios_app pool: every request. Never a privileged role. */
 export function appPool(): pg.Pool {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error('DATABASE_URL missing');
-  if (/\/\/(postgres|ios_owner|ios_migrator)[:@]/.test(url)) throw new Error('DATABASE_URL must use the ios_app role');
-  pool ??= createPool(url);
+  pool ??= poolFor('DATABASE_URL', 'ios_app');
   return pool;
+}
+
+/** ios_auth pool: ONLY the OIDC callback uses it, to create a session for a validated identity. */
+export function sessionAuthPool(): pg.Pool {
+  authPool ??= poolFor('DATABASE_AUTH_URL', 'ios_auth');
+  return authPool;
 }
 
 export function authConfig(): AuthConfig {

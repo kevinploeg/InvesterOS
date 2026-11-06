@@ -3,12 +3,12 @@
  * tenant table is covered automatically (and schema-lint forces it to carry the policy shape).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createPool, withTenantTx } from '../src/db';
+import { createPool, withTenantTx, type SessionCredential } from '../src/db';
 import { writeAudit } from '../src/audit';
 import * as fx from '../src/fixtures';
-import { asApp, harness, ISSUER, staffSettings, type Harness } from './helpers';
+import { asApp, harness, ISSUER, type As, type Harness } from './helpers';
 
-interface Side { tenant: fx.TenantFixture; userId: string; membershipId: string; teamId: string; securableId: string }
+interface Side { tenant: fx.TenantFixture; userId: string; membershipId: string; teamId: string; securableId: string; cred: SessionCredential }
 
 let h: Harness;
 let A: Side;
@@ -27,20 +27,15 @@ async function makeSide(slug: string): Promise<Side> {
   await fx.assignRole(h.admin, tenant.id, tenant.roles.investment_professional, { teamId, scopeId: securableId });
   await fx.grantSecurable(h.admin, tenant.id, securableId, { membershipId, access: 'write', grantedBy: membershipId });
   await h.admin.query('INSERT INTO probe_notes (tenant_id, id, securable_id, body) VALUES ($1, gen_random_uuid(), $2, $3)', [tenant.id, securableId, `note ${slug}`]);
-  await withTenantTx(h.app, fx.staffContext(tenant, userId, membershipId), (tx) =>
-    writeAudit(tx, fx.staffContext(tenant, userId, membershipId), { action: 'test.created', securableId }),
-  );
-  return { tenant, userId, membershipId, teamId, securableId };
+  const cred = await fx.login(h.admin, userId);
+  await withTenantTx(h.app, cred, slug, 'write', (tx, ctx) => writeAudit(tx, ctx, { action: 'test.created', securableId }));
+  return { tenant, userId, membershipId, teamId, securableId, cred };
 }
 
 beforeAll(async () => {
   h = await harness({ probe: true });
   A = await makeSide('tenant-a');
   B = await makeSide('tenant-b');
-  await h.admin.query(`INSERT INTO sessions (id, token_hash, user_id, active_tenant_id, active_membership_id, expires_at)
-    VALUES (gen_random_uuid(), sha256('a'::bytea), $1, $2, $3, now() + interval '1 hour'),
-           (gen_random_uuid(), sha256('b'::bytea), $4, $5, $6, now() + interval '1 hour')`,
-    [A.userId, A.tenant.id, A.membershipId, B.userId, B.tenant.id, B.membershipId]);
   const t = await h.admin.query<{ relname: string }>(`
     SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id'
@@ -55,7 +50,7 @@ beforeAll(async () => {
 });
 afterAll(async () => h?.close());
 
-const asB = () => staffSettings(B.tenant.id, B.userId, B.membershipId);
+const asB = (): As => ({ cred: B.cred, slug: 'tenant-b' });
 
 describe('cross-tenant isolation (generated per tenant table)', () => {
   it('covers every tenant table, each seeded with rows for both tenants', async () => {
@@ -118,15 +113,18 @@ describe('cross-tenant isolation (generated per tenant table)', () => {
 
   it('no context: zero rows from every tenant table and every global table', async () => {
     for (const t of [...tenantTables, 'tenants', 'users', 'user_identities', 'sessions']) {
-      const r = await asApp(h.app, {}, `SELECT count(*)::int AS n FROM ${t}`);
+      const r = await asApp(h.app, null, `SELECT count(*)::int AS n FROM ${t}`);
+      if (t === 'sessions') { expect(r.code).toBe('42501'); continue; } // no privilege at all since M1-WP1
       expect(r.code, t).toBeUndefined();
       expect(r.rows[0]?.n, t).toBe(0);
     }
   });
 
-  it('a malformed context value fails closed with an error, not with data', async () => {
-    const r = await asApp(h.app, { 'app.tenant_id': "' OR 1=1 --" }, 'SELECT count(*) FROM teams');
-    expect(r.code).toBe('22P02');
+  it('tenant B cannot establish a context in tenant A (no membership) — same error as a non-existent tenant', async () => {
+    const r = await asApp(h.app, { cred: B.cred, slug: 'tenant-a' }, 'SELECT 1');
+    const none = await asApp(h.app, { cred: B.cred, slug: 'no-such-tenant' }, 'SELECT 1');
+    expect(r.code).toBe('IOS04');
+    expect(none.code).toBe(r.code);
   });
 
   it('composite FKs: a tenant-B row can never reference a tenant-A parent (even bypassing RLS)', async () => {
@@ -162,7 +160,7 @@ describe('cross-tenant isolation (generated per tenant table)', () => {
 
 describe('global tables', () => {
   it('tenants: a user sees only tenants they are an active member of', async () => {
-    const r = await asApp(h.app, { 'app.user_id': B.userId }, 'SELECT slug FROM tenants ORDER BY slug');
+    const r = await asApp(h.app, { cred: B.cred, slug: null }, 'SELECT slug FROM tenants ORDER BY slug');
     expect(r.rows.map((x) => x.slug)).toEqual(['tenant-b']);
   });
 
@@ -171,10 +169,8 @@ describe('global tables', () => {
     expect(users.rows.map((x) => x.id)).toEqual([B.userId]);
     const ids = await asApp(h.app, asB(), 'SELECT user_id FROM user_identities');
     expect(ids.rows.map((x) => x.user_id)).toEqual([B.userId]);
-    const ses = await asApp(h.app, asB(), 'SELECT user_id FROM sessions');
-    expect(ses.rows.map((x) => x.user_id)).toEqual([B.userId]);
-    const upd = await asApp(h.app, asB(), 'UPDATE sessions SET revoked_at = now() WHERE user_id = $1', [A.userId]);
-    expect(upd.rowCount).toBe(0);
+    expect((await asApp(h.app, asB(), 'SELECT user_id FROM sessions')).code).toBe('42501');
+    expect((await asApp(h.app, asB(), 'UPDATE sessions SET revoked_at = now() WHERE user_id = $1', [A.userId])).code).toBe('42501');
     const upd2 = await asApp(h.app, asB(), 'UPDATE users SET display_name = $2 WHERE id = $1', [A.userId, 'x']);
     expect(upd2.rowCount).toBe(0);
   });
@@ -185,8 +181,8 @@ describe('global tables', () => {
     expect((await asApp(h.app, asB(), `UPDATE users SET email = 'x@y.z' WHERE id = $1`, [B.userId])).code).toBe('42501');
   });
 
-  it('a session cannot be pointed at another tenant membership', async () => {
-    const r = await asApp(h.app, { 'app.user_id': B.userId }, 'UPDATE sessions SET active_tenant_id = $1, active_membership_id = $2 WHERE user_id = $3', [A.tenant.id, A.membershipId, B.userId]);
+  it('the app role cannot read or modify sessions directly (only through auth.* functions)', async () => {
+    const r = await asApp(h.app, { cred: B.cred, slug: null }, 'UPDATE sessions SET active_tenant_id = $1, active_membership_id = $2 WHERE user_id = $3', [A.tenant.id, A.membershipId, B.userId]);
     expect(r.code).toBe('42501');
   });
 });
@@ -195,17 +191,14 @@ describe('connection pool hygiene (M0-AC6)', () => {
   it('context never survives COMMIT or ROLLBACK on a reused connection', async () => {
     const pool = createPool(h.db.appUrl, 1);
     try {
-      await withTenantTx(pool, fx.staffContext(B.tenant, B.userId, B.membershipId), async (tx) => {
-        expect((await tx.query(`SELECT current_setting('app.tenant_id', true) AS t`)).rows[0].t).toBe(B.tenant.id);
+      await withTenantTx(pool, B.cred, 'tenant-b', 'read', async (tx) => {
+        expect((await tx.query(`SELECT app.current_tenant() AS t`)).rows[0].t).toBe(B.tenant.id);
       });
-      const after = await pool.query(`SELECT current_setting('app.tenant_id', true) AS t, (SELECT count(*)::int FROM teams) AS n`);
-      expect(after.rows[0].t ?? '').toBe('');
-      expect(after.rows[0].n).toBe(0);
-      await expect(
-        withTenantTx(pool, fx.staffContext(B.tenant, B.userId, B.membershipId), async () => { throw new Error('boom'); }),
-      ).rejects.toThrow('boom');
-      const after2 = await pool.query(`SELECT current_setting('app.tenant_id', true) AS t`);
-      expect(after2.rows[0].t ?? '').toBe('');
+      const after = await pool.query(`SELECT app.current_tenant() AS t, app.current_membership() AS m, (SELECT count(*)::int FROM teams) AS n`);
+      expect(after.rows[0]).toEqual({ t: null, m: null, n: 0 });
+      await expect(withTenantTx(pool, B.cred, 'tenant-b', 'write', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+      const after2 = await pool.query(`SELECT app.current_tenant() AS t`);
+      expect(after2.rows[0].t).toBeNull();
     } finally {
       await pool.end();
     }
