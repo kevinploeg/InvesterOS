@@ -1,0 +1,12 @@
+node_modules
+.next
+coverage
+dist
+playwright-report
+test-results
+*.log
+.env
+.env.*
+!.env.example
+e2e/.seed.json
+*.tsbuildinfo

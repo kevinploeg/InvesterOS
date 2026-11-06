@@ -1,0 +1,5 @@
+{
+  "common": { "appName": "InvestorOS", "syntheticBanner": "Synthetic data only. Not for real customer or financial data." },
+  "login": { "title": "Sign in", "button": "Sign in with your organisation", "noAccount": "Your identity is not linked to an InvestorOS account. Contact your administrator.", "failed": "Sign-in failed. Please try again." },
+  "workspace": { "title": "Workspace", "signedInAs": "Signed in as {name}", "tenant": "Organisation", "roles": "Roles", "permissions": "{count, plural, one {# permission} other {# permissions}}", "teams": "Teams", "switch": "Switch organisation", "logout": "Sign out", "noTeams": "No teams yet" }
+}

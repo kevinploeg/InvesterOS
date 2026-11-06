@@ -1,0 +1,16 @@
+{
+  "name": "@investoros/mock-oidc",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'covered by kernel auth tests'"
+  },
+  "dependencies": {
+    "jose": "^6.2.15"
+  }
+}

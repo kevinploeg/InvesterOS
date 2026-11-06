@@ -1,0 +1,5 @@
+{
+  "common": { "appName": "InvestorOS", "syntheticBanner": "Alleen synthetische data. Niet voor echte klant- of financiële gegevens." },
+  "login": { "title": "Inloggen", "button": "Inloggen met je organisatie", "noAccount": "Je identiteit is niet gekoppeld aan een InvestorOS-account. Neem contact op met je beheerder.", "failed": "Inloggen mislukt. Probeer het opnieuw." },
+  "workspace": { "title": "Werkruimte", "signedInAs": "Ingelogd als {name}", "tenant": "Organisatie", "roles": "Rollen", "permissions": "{count, plural, one {# recht} other {# rechten}}", "teams": "Teams", "switch": "Wissel van organisatie", "logout": "Uitloggen", "noTeams": "Nog geen teams" }
+}

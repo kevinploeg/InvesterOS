@@ -1,0 +1,22 @@
+{
+  "name": "@investoros/testing",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'no tests'",
+    "seed": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^10.6.0",
+    "@investoros/db": "workspace:*",
+    "@investoros/kernel": "workspace:*",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

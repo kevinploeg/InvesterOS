@@ -1,0 +1,32 @@
+{
+  "name": "@investoros/kernel",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./db": "./src/db/index.ts",
+    "./authz": "./src/authz/index.ts",
+    "./auth": "./src/auth/index.ts",
+    "./audit": "./src/audit/index.ts",
+    "./context": "./src/context/index.ts",
+    "./ids": "./src/ids.ts",
+    "./errors": "./src/errors.ts",
+    "./fixtures": "./src/fixtures.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage",
+    "gen:role-matrix": "tsx scripts/gen-role-matrix.ts"
+  },
+  "dependencies": {
+    "openid-client": "^6.8.9",
+    "pg": "^8.23.1",
+    "uuid": "^14.0.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@investoros/db": "workspace:*",
+    "@investoros/mock-oidc": "workspace:*",
+    "@investoros/testing": "workspace:*",
+    "@types/pg": "^8.23.1"
+  }
+}

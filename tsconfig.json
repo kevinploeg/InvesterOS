@@ -1,0 +1,1 @@
+{ "extends": "./tsconfig.base.json", "compilerOptions": { "module": "ESNext" }, "include": ["e2e", "playwright.config.ts"] }

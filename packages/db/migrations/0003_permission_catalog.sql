@@ -1,0 +1,27 @@
+-- 0003: permission catalog. MUST equal packages/kernel/src/authz/permissions.ts (enforced by test).
+-- To add a permission: add it to the registry AND write a new migration inserting it.
+INSERT INTO meta.permissions (key, description, scopable) VALUES
+  ('tenant.settings.manage', 'Manage tenant settings', false),
+  ('iam.members.read', 'View members, teams and role assignments', false),
+  ('iam.members.manage', 'Invite, suspend and remove members', false),
+  ('iam.teams.manage', 'Create teams and manage team membership', false),
+  ('iam.roles.manage', 'Create custom roles and assign roles', false),
+  ('access.manage', 'Grant and revoke access to restricted resources', false),
+  ('securables.manage', 'Create securables and change their classification', false),
+  ('restricted.oversight', 'Read-only oversight of all restricted resources (compliance); every use is audited', false),
+  ('audit.read', 'Read the audit log', false),
+  ('investors.read', 'View investors, parties and contacts', false),
+  ('investors.write', 'Create and edit investors, parties and contacts', false),
+  ('projects.read', 'View projects', true),
+  ('projects.write', 'Create and edit projects', true),
+  ('opportunities.read', 'View deals/opportunities', true),
+  ('opportunities.write', 'Create and edit deals/opportunities', true),
+  ('offerings.read', 'View offerings and subscriptions', true),
+  ('offerings.write', 'Create and edit offerings and subscriptions', true),
+  ('subscriptions.approve', 'Approve subscriptions (four-eyes)', true),
+  ('crm.read', 'View interactions', true),
+  ('crm.write', 'Record interactions', true),
+  ('tasks.read', 'View tasks', true),
+  ('tasks.write', 'Create and edit tasks', true),
+  ('ledger.read', 'View transactions and holdings', true),
+  ('ledger.post', 'Draft and post ledger transactions (four-eyes)', false);

@@ -1,0 +1,26 @@
+{
+  "name": "@investoros/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3000",
+    "build": "next build",
+    "start": "next start -H 127.0.0.1 -p 3000",
+    "typecheck": "tsc --noEmit",
+    "test": "echo 'web is covered by e2e (playwright)'"
+  },
+  "dependencies": {
+    "@investoros/kernel": "workspace:*",
+    "next": "^16.4.5",
+    "next-intl": "^4.14.9",
+    "pg": "^8.23.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
+  }
+}

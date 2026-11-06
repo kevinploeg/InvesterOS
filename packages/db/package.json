@@ -1,0 +1,23 @@
+{
+  "name": "@investoros/db",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "bootstrap": "tsx src/cli.ts bootstrap",
+    "migrate": "tsx src/cli.ts migrate",
+    
+    "schema-lint": "tsx src/cli.ts lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^10.6.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1"
+  }
+}

@@ -1,0 +1,12 @@
+packages:
+  - apps/*
+  - packages/*
+  - tooling/*
+# Supply-chain control: refuse package versions published less than 3 days ago.
+minimumReleaseAge: 4320
+# Install scripts are disabled by default (pnpm 10). Explicit decision per package:
+onlyBuiltDependencies: []
+ignoredBuiltDependencies:
+  - '@parcel/watcher'
+  - '@swc/core'
+  - esbuild

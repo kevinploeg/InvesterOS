@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: '1'
+  # Synthetic-only CI database. Throwaway credentials, not secrets.
+  DATABASE_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      # TODO(M1): pin all actions to full commit SHAs (Renovate keeps them current).
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint (ESLint + module boundaries)
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Dependency vulnerabilities (production deps, high+)
+        run: pnpm audit --prod --audit-level high
+      - name: Unit + integration (real Postgres, RLS, isolation suite, coverage gate)
+        run: pnpm test
+      - name: Schema lint on a freshly migrated database
+        env:
+          DATABASE_NAME: investoros_ci
+        run: pnpm db:bootstrap && pnpm db:migrate && pnpm db:lint
+      - name: Build web
+        env:
+          DATABASE_URL: postgres://ios_app:dev_app_password@127.0.0.1:5432/investoros_e2e
+          OIDC_ISSUER: http://127.0.0.1:4010
+          OIDC_CLIENT_ID: investoros-web
+          OIDC_CLIENT_SECRET: e2e-client-secret
+          APP_BASE_URL: http://127.0.0.1:3000
+          AUTH_STATE_SECRET: ZTJlLW9ubHktc3RhdGUtc2VjcmV0LW5vdC1mb3ItcHJvZHVjdGlvbg==
+        run: pnpm build
+      - name: E2E (Playwright, Chromium)
+        run: pnpm exec playwright install --with-deps chromium && pnpm test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
+
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
