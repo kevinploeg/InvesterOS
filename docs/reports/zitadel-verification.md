@@ -34,6 +34,9 @@ A US parent means US-law exposure (CLOUD Act) cannot be ruled out on the basis o
 | V11 | **Data export on exit** | Not verified: can users, orgs, identity links and MFA factors (or at least password hashes) be exported? Re-enrolling MFA for all users would be a significant migration cost | ❌ | — |
 | V12 | **DORA Art. 30 contract terms** | Customised terms (MSA/DPA) are, according to the vendor, only for Enterprise (custom pricing, minimum annual contract value). Audit rights, incident notification times, exit assistance and subcontracting terms are not publicly confirmed | ❌ material | [Pro vs Enterprise](https://help.zitadel.com/zitadel-cloud-pro-vs.-enterprise-which-plan-is-right-for-you), [enterprise pricing](https://help.zitadel.com/zitadel-enterprise-pricing-metrics) |
 | V13 | Price | Pro from $100/month (25k DAU); Enterprise custom | ✅ (indicative) | [pricing](https://zitadel.com/pricing) |
+| V15 | Exact `amr` set per login method (password+TOTP, +U2F, passkey, SMS) on the pinned version | Only examples in docs; third-party observations not authoritative | ❌ evidence matrix in WP0 | — |
+| V16 | Org login policy readable via API (force MFA incl. external IdPs, allowed second factors) | Not verified | ❌ WP0 | — |
+| V17 | Is a federated login distinguishable in the ID token? | Not documented | ❌ WP0 | — |
 | V14 | Incident notification time | Not found publicly (needed under GDPR Art. 33 and as DORA input) | ❌ | — |
 
 ## Conclusion

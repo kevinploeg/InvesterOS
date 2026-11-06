@@ -23,4 +23,4 @@
 | T19 | CSRF on state-changing endpoints | T | SameSite=Lax + Origin check; `Referrer-Policy: same-origin` (needed so browsers send Origin) | E2E logout with foreign Origin → 403 | ✅ M0 |
 | T20 | Clickjacking / XSS impact | T, I | CSP `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'`; React escaping | E2E headers | ⚠️ `script-src 'unsafe-inline'` → nonce-based CSP in M5 |
 | T21 | Open redirect / Host-header injection after login | S | Callback URL and redirects built from the configured `APP_BASE_URL`, never from Host | code review | ✅ M0 |
-| T22 | SQL injection leading to context spoofing | E | Parameterised queries only; no raw `pg` in the app (lint) | lint rules | ⚠️ limitation documented in rls-design §6 |
+| T22 | Context spoofing through `set_config` (SQL as `ios_app`) | E, S | M0: parameterised queries only, no raw `pg` in the app. M1: DB-verified, session-bound context (`auth.begin`, no GUC trust) | M1 tests D1–D4 | ⚠️ **open gap in M0**, fixed in M1-WP1 |

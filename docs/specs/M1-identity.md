@@ -1,6 +1,6 @@
 # M1: Identity and tenancy. Acceptance checklist (rev. 2)
 
-Status: **approved at design level; NOT authorized for implementation.**
+Status: **approved in principle; NOT authorized for implementation.** Amended by [m1-clarifications.md](../security/m1-clarifications.md) (rev. 3: C1 replaces D1 and AC1.3/1.5/1.6; C2/C3 supplement AC4/AC5). Plan: [M1-plan.md](M1-plan.md).
 
 Prerequisites before implementation starts:
 1. Explicit approval from the owner.
