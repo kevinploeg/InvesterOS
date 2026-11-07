@@ -1,6 +1,8 @@
 # M1 stage 1 report: WP1, WP2, WP3, WP9
 
 Date: 2026-11-07 · Branch `m0-foundations` · Synthetic data only · Not deployed
+
+**Status: approved by the owner on 2026-11-07** (incl. the temp-table context design from §1). WP0 and WP4–WP10 still need explicit authorisation.
 Baseline before this stage: M0 green at `bff1253` (CI run 42300191852).
 WP4–WP10 have **not** been started.
 
