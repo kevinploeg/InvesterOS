@@ -1,7 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
+import pg from 'pg';
 import type { SeedSummary } from '@investoros/testing';
+
+/** Superuser connection to the synthetic E2E database (test setup only). */
+function e2eAdminUrl(): string {
+  const u = new URL(process.env.DATABASE_ADMIN_URL ?? 'postgres://postgres@127.0.0.1:5432/postgres');
+  u.pathname = '/investoros_e2e';
+  return u.toString();
+}
 
 const seed = (): SeedSummary => JSON.parse(readFileSync(join(__dirname, '.seed.json'), 'utf8'));
 
@@ -90,6 +98,36 @@ test.describe('login and tenant isolation in the UI', () => {
   test('a tampered OIDC callback fails safely', async ({ page }) => {
     await page.goto('/auth/callback?code=forged&state=forged');
     await expect(page).toHaveURL(/\/login\?error=failed$/);
+  });
+});
+
+test.describe('immediate revocation in the UI (M1-WP2, C3)', () => {
+  test('suspending a membership makes that tenant unreachable at once; other tenants keep working; no stale page', async ({ page, request, context }) => {
+    const s = seed();
+    const multi = s.users.find((u) => u.tenants.length > 1)!;
+    await login(page, multi.subject);
+    const first = page.url();
+    await expect(page.getByTestId('tenant-name')).toBeVisible();
+    const slug = new URL(first).pathname.split('/')[2]!;
+    const other = multi.tenants.map((t) => t.slug).find((t) => t !== slug)!;
+    const admin = new pg.Client({ connectionString: e2eAdminUrl() });
+    await admin.connect();
+    const q = `UPDATE tenant_memberships m SET status = $1 FROM tenants t, user_identities ui
+               WHERE t.id = m.tenant_id AND t.slug = $2 AND ui.user_id = m.user_id AND ui.subject = $3`;
+    try {
+      await admin.query(q, ['suspended', slug, multi.subject]);
+      const r = await page.reload();
+      expect(r?.status()).toBe(404);
+      const cookie = (await context.cookies()).find((c) => c.name === 'ios_session')!.value;
+      const me = await request.get('/api/v0/me', { headers: { cookie: `ios_session=${cookie}` } });
+      expect(me.status()).toBe(200);
+      expect((await me.json()).memberships.map((m: { tenant: string }) => m.tenant)).toEqual([other]);
+      const o = await page.goto(`/t/${other}`);
+      expect(o?.status()).toBe(200);
+    } finally {
+      await admin.query(q, ['active', slug, multi.subject]);
+      await admin.end();
+    }
   });
 });
 

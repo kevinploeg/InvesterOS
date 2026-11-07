@@ -22,6 +22,8 @@ const config: NextConfig = {
   reactStrictMode: true,
   transpilePackages: ['@investoros/kernel'],
   serverExternalPackages: ['pg'],
+  // C3: the client router must never show cached RSC payloads of tenant pages after a revocation.
+  experimental: { staleTimes: { dynamic: 0, static: 0 } },
   async headers() {
     return [
       {

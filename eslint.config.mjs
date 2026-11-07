@@ -22,8 +22,15 @@ export default tseslint.config(
           { name: '@investoros/kernel/fixtures', message: 'Fixtures bypass RLS: tests and seed only.' },
           { name: '@investoros/testing', message: 'Test-only package.' },
           { name: '@investoros/mock-oidc', message: 'Dev/test-only IdP.' },
+          { name: 'next/cache', importNames: ['unstable_cache', 'cacheLife', 'cacheTag'], message: 'Tenant data must never enter a shared cache (C3). Fetch per request inside withTenantTx.' },
         ],
       }],
+      // C3: no shared caching of tenant data. The "use cache" directive is banned in the app.
+      'no-restricted-syntax': ['error',
+        { selector: "ExpressionStatement[directive='use cache']", message: "'use cache' is not allowed: tenant data must not be cached across requests (C3)." },
+        { selector: "ExpressionStatement[directive='use cache: remote']", message: "'use cache' is not allowed (C3)." },
+        { selector: "ExpressionStatement[directive='use cache: private']", message: "'use cache' is not allowed (C3)." },
+      ],
     },
   },
 );
