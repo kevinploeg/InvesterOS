@@ -88,6 +88,9 @@ Consequences, each covered by a test:
 
 ### Performance
 
+Child-table pattern (since migration 0007, after the D8 benchmark): `securable_id IN (SELECT s.id FROM securables s)` for reads, plus the same with `classification = 'standard' OR id = ANY(write grants)` for writes. This is evaluated once per statement as a hashed sub-plan. **Do not** use per-row functions such as `app.securable_visible()` in policies on large tables (that exceeded the statement timeout at 1M rows).
+
+
 Policies call helper functions as a scalar sub-select, e.g. `(SELECT app.granted_securables('read'))`. Postgres then evaluates them **once per statement** (InitPlan) instead of once per row. Child tables do one indexed EXISTS on `securables(tenant_id, id)` per row. We will measure this in M3 at realistic volumes, for example 10k projects and 1M child rows.
 
 ### Known gap (deliberate, closed in M2)

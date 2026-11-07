@@ -37,6 +37,7 @@ A US parent means US-law exposure (CLOUD Act) cannot be ruled out on the basis o
 | V15 | Exact `amr` set per login method (password+TOTP, +U2F, passkey, SMS) on the pinned version | Only examples in docs; third-party observations not authoritative | ❌ evidence matrix in WP0 | — |
 | V16 | Org login policy readable via API (force MFA incl. external IdPs, allowed second factors) | Not verified | ❌ WP0 | — |
 | V17 | Is a federated login distinguishable in the ID token? | Not documented | ❌ WP0 | — |
+| V18 | **Force MFA for federated users under Hosted Login V2** | Zitadel documents that Hosted Login V2 does **not** support "Force MFA" for externally authenticated users ([source](https://zitadel.com/docs/guides/integrate/login/hosted-login)). D3 (federated users must do Zitadel MFA) then requires Login V1 or an own check. **Material for WP5** | ⚠️ confirm in WP0 | [hosted login](https://zitadel.com/docs/guides/integrate/login/hosted-login), [login policy API](https://zitadel.com/docs/reference/api/management/zitadel.management.v1.ManagementService.GetLoginPolicy) |
 | V14 | Incident notification time | Not found publicly (needed under GDPR Art. 33 and as DORA input) | ❌ | — |
 
 ## Conclusion
