@@ -309,15 +309,17 @@ CREATE FUNCTION auth.switch_tenant(p_new_token text, p_tenant_slug text) RETURNS
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog AS
 $$
 DECLARE
-  v_ctx record;
+  v_session uuid;
+  v_user uuid;
+  v_principal text;
   v_old record;
   v_mem record;
   v_id uuid := gen_random_uuid();
 BEGIN
   IF to_regclass('pg_temp.ios_tx_context') IS NOT NULL THEN
-    SELECT * INTO v_ctx FROM pg_temp.ios_tx_context;
+    SELECT c.session_id, c.user_id, c.principal_type INTO v_session, v_user, v_principal FROM pg_temp.ios_tx_context c;
   END IF;
-  IF v_ctx.session_id IS NULL OR v_ctx.principal_type <> 'user' THEN
+  IF v_session IS NULL OR v_principal IS DISTINCT FROM 'user' THEN
     RAISE EXCEPTION 'tenant switch requires a user-level context' USING ERRCODE = 'IOS01';
   END IF;
   IF p_new_token IS NULL OR length(p_new_token) NOT BETWEEN 32 AND 128 THEN
@@ -325,17 +327,17 @@ BEGIN
   END IF;
   SELECT t.id AS tid, m.id AS mid INTO v_mem
   FROM public.tenants t JOIN public.tenant_memberships m ON m.tenant_id = t.id
-  WHERE t.slug = p_tenant_slug AND t.status = 'active' AND m.user_id = v_ctx.user_id AND m.status = 'active';
+  WHERE t.slug = p_tenant_slug AND t.status = 'active' AND m.user_id = v_user AND m.status = 'active';
   IF NOT FOUND THEN
     RAISE EXCEPTION 'tenant not accessible' USING ERRCODE = 'IOS04';
   END IF;
-  UPDATE public.sessions s SET revoked_at = now() WHERE s.id = v_ctx.session_id AND s.revoked_at IS NULL
+  UPDATE public.sessions s SET revoked_at = now() WHERE s.id = v_session AND s.revoked_at IS NULL
   RETURNING s.expires_at INTO v_old;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'no valid session' USING ERRCODE = 'IOS01';
   END IF;
   INSERT INTO public.sessions (id, token_hash, user_id, active_tenant_id, active_membership_id, expires_at)
-  VALUES (v_id, sha256(convert_to(p_new_token, 'UTF8')), v_ctx.user_id, v_mem.tid, v_mem.mid, v_old.expires_at);
+  VALUES (v_id, sha256(convert_to(p_new_token, 'UTF8')), v_user, v_mem.tid, v_mem.mid, v_old.expires_at);
   RETURN QUERY SELECT v_id, v_old.expires_at;
 END
 $$;

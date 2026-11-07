@@ -133,11 +133,12 @@ describe('write barrier', () => {
     expect(r.code).toBe('42501');
   });
 
-  it('KNOWN GAP (closed in M2): an access manager can grant themselves access; it is attributable via granted_by', async () => {
-    const r = await asApp(h.app, as('admin'),
-      `INSERT INTO securable_grants (tenant_id, id, securable_id, membership_id, access, granted_by) VALUES ($1, gen_random_uuid(), $2, $3, 'read', $3) RETURNING granted_by`,
-      [T.id, R, U.admin!.membershipId]);
-    expect(r.rows[0]?.granted_by).toBe(U.admin!.membershipId);
+  it('self-grant is refused by the database (M0 gap closed in M1-WP3), in every mode', async () => {
+    const sql = `INSERT INTO securable_grants (tenant_id, id, securable_id, membership_id, access, granted_by) VALUES ($1, gen_random_uuid(), $2, $3, 'read', $3)`;
+    for (const mode of ['write', 'iam'] as const) {
+      const r = await asApp(h.app, { ...as('admin')!, mode }, sql, [T.id, R, U.admin!.membershipId]);
+      expect(r.code, mode).toBe('IOS03');
+    }
   });
 });
 
