@@ -16,7 +16,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run --coverage",
-    "gen:role-matrix": "tsx scripts/gen-role-matrix.ts"
+    "gen:role-matrix": "tsx scripts/gen-role-matrix.ts",
+    "bench": "tsx scripts/bench-context.mts"
   },
   "dependencies": {
     "openid-client": "^6.8.9",
