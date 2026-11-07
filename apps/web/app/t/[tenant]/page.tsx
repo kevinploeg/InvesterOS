@@ -28,6 +28,8 @@ export default async function TenantHome({ params }: { params: Promise<{ tenant:
     if (e.name === 'AuthenticationError') redirect('/login');
     throw e;
   });
+  // Membership verified above by the database. Make this tenant the session's active tenant via rotation.
+  if (session.activeTenantSlug !== tenant) redirect(`/auth/switch?to=${encodeURIComponent(tenant)}`);
   const memberships = session.memberships;
 
   return (

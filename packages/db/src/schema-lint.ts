@@ -15,7 +15,11 @@ export const REQUIRED_POLICY_ROLES = ['ios_app', 'ios_worker'] as const;
 const APP_ROLES = ['ios_app', 'ios_worker', 'ios_definer', 'ios_auth'] as const;
 
 /** Tables on which ios_definer may hold policies (pre-context auth paths only). */
-export const DEFINER_TABLES = ['users', 'user_identities', 'sessions', 'tenants', 'tenant_memberships'] as const;
+export const DEFINER_TABLES = [
+  'users', 'user_identities', 'sessions', 'tenants', 'tenant_memberships', // session + context validation
+  'role_assignments', 'role_permissions', 'team_members', 'securable_grants', 'roles', // single permission evaluator + epoch bumps
+  'jobs', // job execution re-validation
+] as const;
 
 export interface LintViolation {
   rule: string;

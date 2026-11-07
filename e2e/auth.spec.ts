@@ -53,14 +53,18 @@ test.describe('login and tenant isolation in the UI', () => {
     expect(await page.locator('main').innerText()).toBe(foreignBody);
   });
 
-  test('a multi-tenant user can switch tenants (A8)', async ({ page }) => {
+  test('a multi-tenant user can switch tenants (A8); switching rotates the session token (R5)', async ({ page, context, request }) => {
     const s = seed();
     const multi = s.users.find((u) => u.tenants.length > 1)!;
     await login(page, multi.subject);
     await expect(page.getByTestId('tenant-switcher')).toBeVisible();
+    const before = (await context.cookies()).find((c) => c.name === 'ios_session')!.value;
     await page.getByRole('link', { name: s.tenants[2]!.name }).click();
     await expect(page).toHaveURL(new RegExp(`/t/${s.tenants[2]!.slug}$`));
     await expect(page.getByTestId('tenant-name')).toHaveText(s.tenants[2]!.name);
+    const after = (await context.cookies()).find((c) => c.name === 'ios_session')!.value;
+    expect(after).not.toBe(before);
+    expect((await request.get('/api/v0/me', { headers: { cookie: `ios_session=${before}` } })).status()).toBe(401);
   });
 
   test('an identity unknown to InvestorOS is refused', async ({ page }) => {

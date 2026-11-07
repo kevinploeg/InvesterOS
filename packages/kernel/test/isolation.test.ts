@@ -28,7 +28,11 @@ async function makeSide(slug: string): Promise<Side> {
   await fx.grantSecurable(h.admin, tenant.id, securableId, { membershipId, access: 'write', grantedBy: membershipId });
   await h.admin.query('INSERT INTO probe_notes (tenant_id, id, securable_id, body) VALUES ($1, gen_random_uuid(), $2, $3)', [tenant.id, securableId, `note ${slug}`]);
   const cred = await fx.login(h.admin, userId);
-  await withTenantTx(h.app, cred, slug, 'write', (tx, ctx) => writeAudit(tx, ctx, { action: 'test.created', securableId }));
+  await withTenantTx(h.app, cred, slug, 'write', async (tx, ctx) => {
+    await writeAudit(tx, ctx, { action: 'test.created', securableId });
+    await tx.query(`INSERT INTO jobs (tenant_id, id, kind, permission, enqueued_by) VALUES ($1, gen_random_uuid(), 'test.job', 'audit.read', $2)`,
+      [ctx.tenantId, ctx.membershipId]);
+  });
   return { tenant, userId, membershipId, teamId, securableId, cred };
 }
 
@@ -55,7 +59,7 @@ const asB = (): As => ({ cred: B.cred, slug: 'tenant-b' });
 describe('cross-tenant isolation (generated per tenant table)', () => {
   it('covers every tenant table, each seeded with rows for both tenants', async () => {
     expect(tenantTables).toEqual(expect.arrayContaining([
-      'audit_events', 'probe_notes', 'role_assignments', 'role_permissions', 'roles', 'securable_grants',
+      'audit_events', 'jobs', 'probe_notes', 'role_assignments', 'role_permissions', 'roles', 'securable_grants',
       'securables', 'team_members', 'teams', 'tenant_memberships',
     ]));
     for (const t of tenantTables) {

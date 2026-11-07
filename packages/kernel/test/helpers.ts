@@ -48,7 +48,7 @@ export async function asApp(pool: pg.Pool, as: As, sql: string, params: unknown[
   try {
     await c.query('BEGIN');
     try {
-      if (as) await c.query('SELECT auth.begin($1, $2, $3)', [as.cred.reveal(), as.slug, as.mode ?? 'write']);
+      if (as) await c.query('SELECT auth.begin($1, $2, $3)', [as.cred.reveal(), as.slug, as.mode ?? (as.slug === null ? 'read' : 'write')]);
       const r = await c.query(sql, params);
       return { rows: r.rows, rowCount: r.rowCount ?? 0 };
     } catch (e) {

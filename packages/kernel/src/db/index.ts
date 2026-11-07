@@ -5,7 +5,8 @@ import { AuthenticationError, NotFoundError } from '../errors';
 import { isUuid } from '../ids';
 
 export type Tx = pg.PoolClient;
-export type TxMode = 'read' | 'write';
+/** read: no locks. write: FOR SHARE on own membership + tenant (serialises with revocations). iam: + per-tenant IAM lock. */
+export type TxMode = 'read' | 'write' | 'iam';
 
 export function createPool(connectionString: string, max = 10): pg.Pool {
   return new pg.Pool({ connectionString, max, idleTimeoutMillis: 30_000, application_name: 'investoros', statement_timeout: 15_000 });

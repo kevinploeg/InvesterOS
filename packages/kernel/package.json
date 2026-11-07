@@ -10,7 +10,8 @@
     "./context": "./src/context/index.ts",
     "./ids": "./src/ids.ts",
     "./errors": "./src/errors.ts",
-    "./fixtures": "./src/fixtures.ts"
+    "./fixtures": "./src/fixtures.ts",
+    "./jobs": "./src/jobs/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

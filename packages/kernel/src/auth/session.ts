@@ -74,3 +74,16 @@ export async function getSessionView(appPool: pg.Pool, credential: SessionCreden
 export async function revokeSession(appPool: pg.Pool, credential: SessionCredential): Promise<void> {
   await withUserTx(appPool, credential, (tx) => tx.query('SELECT auth.revoke_current_session()'));
 }
+
+/**
+ * Tenant switch with token rotation: the database revokes the current session and issues a new one for
+ * the target tenant (same user, same absolute expiry). The old credential is invalid immediately.
+ */
+export async function switchTenant(appPool: pg.Pool, credential: SessionCredential, tenantSlug: string): Promise<{ credential: SessionCredential; expiresAt: Date }> {
+  const token = randomBytes(32).toString('base64url');
+  const expiresAt = await withUserTx(appPool, credential, async (tx) => {
+    const r = await tx.query<{ expires_at: Date }>('SELECT * FROM auth.switch_tenant($1, $2)', [token, tenantSlug]);
+    return r.rows[0]!.expires_at;
+  });
+  return { credential: new SessionCredential(token), expiresAt };
+}

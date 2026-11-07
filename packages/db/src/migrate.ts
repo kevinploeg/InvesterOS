@@ -43,6 +43,12 @@ export async function bootstrap(adminUrl: string, database: string, passwords: R
     // ios_definer holds the per-connection request-context temp table (see migration 0004).
     // Request roles deliberately do NOT get TEMPORARY: they cannot create or shadow temp objects.
     await admin.query(`GRANT TEMPORARY ON DATABASE ${database} TO ios_definer`);
+    // Bounded revocation latency: no request can hold locks (e.g. FOR SHARE on its membership) for long.
+    for (const role of ['ios_app', 'ios_worker', 'ios_auth']) {
+      await admin.query(`ALTER ROLE ${role} IN DATABASE ${database} SET statement_timeout = '15s'`);
+      await admin.query(`ALTER ROLE ${role} IN DATABASE ${database} SET idle_in_transaction_session_timeout = '30s'`);
+      await admin.query(`ALTER ROLE ${role} IN DATABASE ${database} SET lock_timeout = '10s'`);
+    }
     await admin.query(`GRANT CONNECT, TEMPORARY ON DATABASE ${database} TO ios_owner`);
   } finally {
     await admin.end();
